@@ -1,9 +1,13 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getAuthenticatedUser } from '@/lib/server/auth';
-import { readServerStore, writeServerStore } from '@/lib/server/store';
+import {
+  NextRequest,
+  NextResponse } from 'next/server'; import { getAuthenticatedUser } from '@/lib/server/auth'; import { readServerStore,
+  ensureStoreHydrated,
+  writeServerStore,
+} from '@/lib/server/store';
 import { LiveWatchSession } from '@/lib/types';
 
 export async function GET(req: NextRequest) {
+  await ensureStoreHydrated();
   const user = getAuthenticatedUser(req);
   if (!user) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });
@@ -23,6 +27,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureStoreHydrated();
   const user = getAuthenticatedUser(req);
   if (!user) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });

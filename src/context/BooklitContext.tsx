@@ -37,6 +37,7 @@ import {
   exportAllUserDataJson,
   flushSyncQueue,
   hydrateUserSnapshotIntoDexie,
+  pushLocalDataToCloud,
   recordAppForegroundSeconds,
 } from '@/lib/db/dexie';
 import { estimateUserGenreSpeed } from '@/lib/domain/speedModel';
@@ -138,8 +139,16 @@ interface BooklitContextValue {
   signInAccount: (params: {
     identifier: string;
     password: string;
-  }) => Promise<{ ok: boolean; error?: string }>;
+  }) => Promise<{ ok: boolean; error?: string; code?: string }>;
   signOutAccount: () => Promise<void>;
+  /** Re-create this device's account on a server that lost its data. */
+  recoverAccount: (params: {
+    userId: string;
+    email: string;
+    username: string;
+    displayName: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
 
   // Domain Actions
   updateProfile: (
@@ -637,7 +646,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     async (params: {
       identifier: string;
       password: string;
-    }): Promise<{ ok: boolean; error?: string }> => {
+    }): Promise<{ ok: boolean; error?: string; code?: string }> => {
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
@@ -645,7 +654,13 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           body: JSON.stringify(params),
         });
         const data = await res.json();
-        if (!res.ok) return { ok: false, error: data.error || 'Invalid credentials' };
+        if (!res.ok) {
+          return {
+            ok: false,
+            error: data.error || 'Sign-in failed. Check your email/username and password.',
+            code: data.code,
+          };
+        }
 
         await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
         window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
@@ -657,6 +672,44 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       }
     },
     []
+  );
+
+  const recoverAccount = useCallback(
+    async (params: {
+      userId: string;
+      email: string;
+      username: string;
+      displayName: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const tz =
+          typeof Intl !== 'undefined'
+            ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+            : 'UTC';
+        const res = await fetch('/api/auth/recover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...params, timezone: tz }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Recovery failed' };
+
+        await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
+        }
+        setActiveUserId(data.user.id);
+        setActiveView('dashboard');
+        // Push this device's local books/sessions back to the cloud.
+        await pushLocalDataToCloud(data.user.id).catch(() => {});
+        await refreshSocialAndDuels().catch(() => {});
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while recovering the account.' };
+      }
+    },
+    [refreshSocialAndDuels]
   );
 
   const signOutAccount = useCallback(async () => {
@@ -1529,6 +1582,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const deleteAccount = useCallback(async () => {
     if (!activeUserId) return;
+    // Remove the durable server record first (account, snapshots, tethers,
+    // sparks, duel/challenge entries) so "delete" is truly permanent.
+    await fetch('/api/sync', { method: 'DELETE' }).catch(() => {});
     await deleteUserAccountData(activeUserId);
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem('booklit_last_auth_uid');
@@ -1583,6 +1639,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     registerAccount,
     signInAccount,
     signOutAccount,
+    recoverAccount,
 
     updateProfile,
     addBook,

@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { clearSessionCookie, getAuthenticatedUser } from '@/lib/server/auth';
-import { readServerStore, writeServerStore } from '@/lib/server/store';
+import {
+  ensureStoreHydrated,
+  persistStoreNow,
+  readServerStore,
+  writeServerStore,
+} from '@/lib/server/store';
 import { SyncQueueItem, UserProfile } from '@/lib/types';
 
 export async function GET(req: NextRequest) {
+  await ensureStoreHydrated();
   const authUser = getAuthenticatedUser(req);
   if (!authUser) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -14,6 +20,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureStoreHydrated();
   const authUser = getAuthenticatedUser(req);
   if (!authUser) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -87,6 +94,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  await ensureStoreHydrated();
   const authUser = getAuthenticatedUser(req);
   if (!authUser) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -94,17 +102,55 @@ export async function DELETE(req: NextRequest) {
 
   try {
     const store = readServerStore();
+
+    // 1. Cloud snapshots + credentials + lookup indexes
     delete store.usersData[authUser.id];
-    delete store.accountIdByEmail[authUser.email];
-    delete store.accountIdByUsername[authUser.username];
     delete store.accountsById[authUser.id];
+    delete store.accountIdByEmail[(authUser.email ?? '').trim().toLowerCase()];
+    delete store.accountIdByUsername[(authUser.username ?? '').trim().toLowerCase()];
+
+    // 2. Tethers in both directions
     delete store.followsByUserId[authUser.id];
-    writeServerStore(store);
+    for (const [viewerId, list] of Object.entries(store.followsByUserId)) {
+      store.followsByUserId[viewerId] = list.filter((id) => id !== authUser.id);
+    }
+
+    // 3. Sparks this reader received or gave
+    for (const [eventId, list] of Object.entries(store.sparksByEventId)) {
+      const remaining = list.filter((id) => id !== authUser.id);
+      if (remaining.length > 0) store.sparksByEventId[eventId] = remaining;
+      else delete store.sparksByEventId[eventId];
+    }
+    store.activityFeed = store.activityFeed.filter(
+      (event) => event.actorUserId !== authUser.id
+    );
+
+    // 4. Duel entries and challenge leaderboard rows
+    for (const [duelId, duel] of Object.entries(store.duels)) {
+      if (duel.challenger.userId === authUser.id || duel.opponent?.userId === authUser.id) {
+        delete store.duels[duelId];
+      }
+    }
+    for (const challenge of Object.values(store.challenges)) {
+      challenge.participants = challenge.participants.filter(
+        (participant) => participant.userId !== authUser.id
+      );
+    }
+
+    // 5. Live rooms owned by the reader
+    for (const [roomId, room] of Object.entries(store.liveWatchRooms)) {
+      if (room.host_user_id === authUser.id) delete store.liveWatchRooms[roomId];
+    }
+
+    await persistStoreNow(store);
 
     const res = NextResponse.json({ status: 'deleted', userId: authUser.id });
     clearSessionCookie(res);
     return res;
-  } catch {
-    return NextResponse.json({ error: 'Delete failed' }, { status: 500 });
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Delete failed: ${(err as Error).message}` },
+      { status: 500 }
+    );
   }
 }

@@ -1,11 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { addDays } from 'date-fns';
-import { getAuthenticatedUser } from '@/lib/server/auth';
-import { appendActivityEvent, readServerStore, writeServerStore } from '@/lib/server/store';
+import {
+  NextRequest,
+  NextResponse } from 'next/server'; import { addDays } from 'date-fns'; import { getAuthenticatedUser } from '@/lib/server/auth'; import { appendActivityEvent,
+  ensureStoreHydrated,
+  readServerStore,
+  writeServerStore,
+} from '@/lib/server/store';
 import { ReadingChallenge } from '@/lib/types';
 import { settleExpiredDuels } from '@/lib/server/duelSettlement';
 
 export async function GET(req: NextRequest) {
+  await ensureStoreHydrated();
   const user = getAuthenticatedUser(req);
   if (!user) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });
@@ -34,6 +38,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureStoreHydrated();
   const user = getAuthenticatedUser(req);
   if (!user) {
     return NextResponse.json(

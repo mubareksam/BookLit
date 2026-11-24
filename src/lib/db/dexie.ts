@@ -92,6 +92,63 @@ export async function enqueueSyncItem(
   await db.syncQueue.put(item);
 }
 
+/**
+ * Re-upload everything this device already holds for a reader. Used after an
+ * account recovery so local-only history is never stranded on the device.
+ */
+export async function pushLocalDataToCloud(userId: string): Promise<number> {
+  if (!db) return 0;
+
+  const [books, sessions, events, tbr, aggregates] = await Promise.all([
+    db.books.where('user_id').equals(userId).toArray(),
+    db.sessions.where('user_id').equals(userId).toArray(),
+    db.verificationEvents.where('user_id').equals(userId).toArray(),
+    db.tbrItems.where('user_id').equals(userId).toArray(),
+    db.dailyAggregates.where('user_id').equals(userId).toArray(),
+  ]);
+
+  let queued = 0;
+  for (const book of books) {
+    await enqueueSyncItem(userId, 'book', 'upsert', book);
+    queued++;
+  }
+  for (const session of sessions) {
+    await enqueueSyncItem(userId, 'session', 'upsert', session);
+    queued++;
+  }
+  for (const event of events) {
+    await enqueueSyncItem(userId, 'verification_event', 'upsert', event);
+    queued++;
+  }
+  for (const item of tbr) {
+    await enqueueSyncItem(userId, 'tbr', 'upsert', item);
+    queued++;
+  }
+  for (const aggregate of aggregates) {
+    await enqueueSyncItem(userId, 'daily_aggregate', 'upsert', aggregate);
+    queued++;
+  }
+
+  if (queued > 0) await flushSyncQueue(userId);
+  return queued;
+}
+
+export async function findLocalUserByIdentifier(
+  identifier: string
+): Promise<UserProfile | null> {
+  if (!db) return null;
+  const needle = identifier.trim().replace(/^@+/, '').toLowerCase();
+  if (!needle) return null;
+  const users = await db.users.toArray();
+  return (
+    users.find(
+      (user) =>
+        (user.email ?? '').toLowerCase() === needle ||
+        (user.username ?? '').toLowerCase() === needle
+    ) ?? null
+  );
+}
+
 export async function flushSyncQueue(
   userId: string
 ): Promise<{ syncedCount: number; remainingCount: number }> {
