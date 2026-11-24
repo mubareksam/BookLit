@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: booklit
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"

@@ -18,7 +18,7 @@ interface ServerDataShape {
   liveWatchRooms: Record<string, LiveWatchSession>;
 }
 
-const DATA_DIR = path.join(process.cwd(), '.data');
+const DATA_DIR = process.env.BOOKLIT_DATA_DIR || path.join(process.cwd(), '.data');
 const DATA_FILE = path.join(DATA_DIR, 'booklit-server.json');
 
 function ensureDefaultStore(): ServerDataShape {
