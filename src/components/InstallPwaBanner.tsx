@@ -1,64 +1,43 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Bell, Download, Share, Smartphone, X } from 'lucide-react';
+import React from 'react';
+import { Bell, Download, Smartphone, X } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
+import { usePwaInstallState } from './InstallAppButton';
+import { promptPwaInstall } from '@/lib/pwaInstall';
 
-interface BeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
-}
-
+/**
+ * Home-screen install card for mobile visitors. It no longer depends on the
+ * browser firing `beforeinstallprompt` (which never happens on iOS Safari);
+ * when the native prompt is unavailable it offers the guided steps instead.
+ */
 export function InstallPwaAndNotificationBanners() {
   const {
     showFirstSessionNotificationBanner,
     dismissFirstSessionNotificationBanner,
     updateProfile,
-    isStandalonePwa,
   } = useBooklit();
+  const install = usePwaInstallState();
+  const [installDismissed, setInstallDismissed] = React.useState(false);
+  const [notifStatusMsg, setNotifStatusMsg] = React.useState<string | null>(null);
 
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [showIosBanner, setShowIosBanner] = useState(false);
-  const [installDismissed, setInstallDismissed] = useState(false);
-  const [notifStatusMsg, setNotifStatusMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || isStandalonePwa) return;
-    if (window.sessionStorage.getItem('booklit_install_dismissed') === '1') {
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.localStorage.getItem('booklit_install_dismissed') === '1') {
       setInstallDismissed(true);
-      return;
     }
-
-    const ua = window.navigator.userAgent.toLowerCase();
-    const isIos = /iphone|ipad|ipod/.test(ua);
-    const isSafari = /safari/.test(ua) && !/crios|fxios|edgios|chrome/.test(ua);
-
-    if (isIos && isSafari) {
-      setShowIosBanner(true);
-    }
-
-    const handler = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
-    };
-    window.addEventListener('beforeinstallprompt', handler);
-    return () => window.removeEventListener('beforeinstallprompt', handler);
-  }, [isStandalonePwa]);
+  }, []);
 
   const dismissInstall = () => {
     setInstallDismissed(true);
-    setShowIosBanner(false);
-    setDeferredPrompt(null);
     if (typeof window !== 'undefined') {
-      window.sessionStorage.setItem('booklit_install_dismissed', '1');
+      window.localStorage.setItem('booklit_install_dismissed', '1');
     }
   };
 
-  const handleChromiumInstall = async () => {
-    if (!deferredPrompt) return;
-    await deferredPrompt.prompt();
-    await deferredPrompt.userChoice;
-    setDeferredPrompt(null);
+  const handleInstall = async () => {
+    const outcome = await promptPwaInstall();
+    if (outcome === 'accepted' || outcome === 'installed') dismissInstall();
   };
 
   const handleEnableNotifications = async () => {
@@ -96,72 +75,45 @@ export function InstallPwaAndNotificationBanners() {
     }, 1400);
   };
 
+  const showInstallCard =
+    !installDismissed && !install.isInstalled && install.platform !== 'desktop';
+
   return (
     <div className="space-y-2.5 mb-4">
-      {/* Chromium Native Install Banner */}
-      {!installDismissed && deferredPrompt && (
-        <div className="rounded-xl border border-emerald-700/25 bg-emerald-950/5 dark:bg-emerald-900/20 px-4 py-3 flex items-center justify-between gap-3">
+      {showInstallCard && (
+        <div className="rounded-xl border border-emerald-700/25 bg-emerald-500/5 dark:bg-emerald-900/20 px-4 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="p-2 rounded-lg bg-emerald-700/15 text-emerald-700 dark:text-emerald-300 shrink-0">
               <Smartphone className="w-4 h-4" />
             </div>
-            <div className="text-sm">
-              <p className="font-medium text-stone-900 dark:text-stone-100">
-                Install Booklit as an Offline Reading App
-              </p>
-              <p className="text-xs text-stone-600 dark:text-stone-400">
-                Unlocks thumb-zone scan flow, instant offline session drafts, and OLED dark mode.
+            <div className="text-xs min-w-0">
+              <p className="font-semibold text-zinc-900 dark:text-zinc-100">Add Booklit to Home Screen</p>
+              <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
+                Full-screen reading, offline drafts, no browser bars.
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
-              onClick={handleChromiumInstall}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium transition"
+              type="button"
+              onClick={handleInstall}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-semibold transition"
             >
               <Download className="w-3.5 h-3.5" />
-              Install App
+              Install
             </button>
             <button
+              type="button"
               onClick={dismissInstall}
-              aria-label="Dismiss install banner"
-              className="p-1.5 rounded-lg text-stone-500 hover:bg-stone-200/60 dark:hover:bg-stone-800"
+              aria-label="Dismiss install card"
+              className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
             >
-              <X className="w-4 h-4" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
       )}
 
-      {/* iOS Safari Manual Instructions Banner (never a dead-end auto-prompt!) */}
-      {!installDismissed && showIosBanner && (
-        <div className="rounded-xl border border-stone-300 dark:border-stone-700 bg-paper-100 dark:bg-ink-800 px-4 py-3 flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="p-2 rounded-lg bg-emerald-700/15 text-emerald-700 dark:text-emerald-300 mt-0.5">
-              <Share className="w-4 h-4" />
-            </div>
-            <div className="text-xs leading-relaxed text-stone-700 dark:text-stone-300">
-              <p className="font-semibold text-stone-900 dark:text-stone-100">
-                Add Booklit to your iPhone Home Screen
-              </p>
-              <p className="mt-0.5">
-                Tap Safari’s <span className="font-semibold">Share</span> button below, then choose{' '}
-                <span className="font-semibold">“Add to Home Screen”</span> for full-screen page
-                scanning and offline reading drafts.
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={dismissInstall}
-            aria-label="Dismiss iOS instructions"
-            className="p-1 rounded-lg text-stone-500 hover:bg-stone-200/60 dark:hover:bg-stone-700"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* Post-First-Session Gentle Notification Explainer (never shown on first visit!) */}
       {showFirstSessionNotificationBanner && (
         <div className="rounded-xl border border-amber-600/30 bg-amber-500/10 px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -169,12 +121,11 @@ export function InstallPwaAndNotificationBanners() {
               <Bell className="w-4 h-4" />
             </div>
             <div>
-              <p className="text-sm font-medium text-stone-900 dark:text-stone-100">
-                Nice session! Want gentle reminders for your scheduled reading windows?
+              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                Nice session! Want gentle reminders for your reading windows?
               </p>
-              <p className="text-xs text-stone-600 dark:text-stone-300 mt-0.5">
-                We only nudge during windows you choose (with automatic email fallback if push isn’t
-                supported). Never spammy.
+              <p className="text-xs text-zinc-600 dark:text-zinc-300 mt-0.5">
+                Only during windows you choose, with email fallback if push isn’t supported.
               </p>
               {notifStatusMsg && (
                 <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300 mt-1">
@@ -185,12 +136,14 @@ export function InstallPwaAndNotificationBanners() {
           </div>
           <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
             <button
+              type="button"
               onClick={dismissFirstSessionNotificationBanner}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-200/60 dark:hover:bg-stone-800"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200/60 dark:hover:bg-zinc-800"
             >
               Not now
             </button>
             <button
+              type="button"
               onClick={handleEnableNotifications}
               className="px-3.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium transition"
             >

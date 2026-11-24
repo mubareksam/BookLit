@@ -172,14 +172,20 @@ export function ReaderProfileDrawer() {
                   <strong className="text-zinc-900 dark:text-zinc-100">
                     {profile.followersCount}
                   </strong>{' '}
-                  followers
+                  tethers
                 </span>
                 <span>
                   <strong className="text-zinc-900 dark:text-zinc-100">
                     {profile.followingCount}
                   </strong>{' '}
-                  following
+                  tethering
                 </span>
+                {typeof profile.sparkCount === 'number' && (
+                  <span className="inline-flex items-center gap-1">
+                    ✦ <strong className="text-zinc-900 dark:text-zinc-100">{profile.sparkCount}</strong>{' '}
+                    sparks
+                  </span>
+                )}
                 <span>Joined {format(new Date(profile.joinedAt), 'MMM yyyy')}</span>
               </div>
 
@@ -196,11 +202,12 @@ export function ReaderProfileDrawer() {
                   >
                     {profile.isFollowing ? (
                       <>
-                        <UserCheck className="w-3.5 h-3.5" /> Following
+                        <UserCheck className="w-3.5 h-3.5" />
+                        {profile.isTethered ? 'Tethered' : 'Tethering'}
                       </>
                     ) : (
                       <>
-                        <UserPlus className="w-3.5 h-3.5" /> Follow
+                        <UserPlus className="w-3.5 h-3.5" /> Tether
                       </>
                     )}
                   </button>
@@ -233,10 +240,11 @@ export function ReaderProfileDrawer() {
               </div>
               <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/70 p-2.5">
                 <div className="text-[10px] text-zinc-500 flex items-center justify-center gap-0.5">
-                  <ShieldCheck className="w-3 h-3 text-emerald-600" /> Trust
+                  <ShieldCheck className="w-3 h-3 text-emerald-600" /> Honest
                 </div>
                 <div className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
                   {profile.avgTrustScore}
+                  <span className="text-[9px] font-normal text-zinc-400">/1000</span>
                 </div>
               </div>
               <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/70 p-2.5">

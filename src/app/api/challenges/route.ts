@@ -3,7 +3,7 @@ import { addDays } from 'date-fns';
 import { getAuthenticatedUser } from '@/lib/server/auth';
 import { appendActivityEvent, readServerStore, writeServerStore } from '@/lib/server/store';
 import { ReadingChallenge } from '@/lib/types';
-import { settleExpiredDuels } from '@/app/api/duels/route';
+import { settleExpiredDuels } from '@/lib/server/duelSettlement';
 
 export async function GET(req: NextRequest) {
   const user = getAuthenticatedUser(req);
@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
       trustScore?: number;
       bookTitle?: string;
       liveCameraVerified?: boolean;
+      medium?: 'physical' | 'ebook' | 'audio';
       challengeEligible?: boolean;
     };
 
@@ -101,7 +102,7 @@ export async function POST(req: NextRequest) {
             verifiedMinutes: 0,
             verifiedPages: 0,
             verifiedSessionsCount: 0,
-            avgTrustScore: 100,
+            avgTrustScore: 1000,
             joinedAt: now.toISOString(),
             lastVerifiedAt: null,
           },
@@ -143,7 +144,7 @@ export async function POST(req: NextRequest) {
           verifiedMinutes: 0,
           verifiedPages: 0,
           verifiedSessionsCount: 0,
-          avgTrustScore: 100,
+          avgTrustScore: 1000,
           joinedAt: new Date().toISOString(),
           lastVerifiedAt: null,
         });
@@ -161,18 +162,22 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === 'record_verified_session') {
-      // Strict Anti-Cheat Gate: ONLY live-camera scanned + anti-cheat eligible sessions credit Challenges or Duels
-      if (!body.challengeEligible || !body.liveCameraVerified) {
+      // Strict Anti-Cheat Gate: only live-camera scanned sessions (or e-reader
+      // checkpoint sealed sessions, where page scans are physically impossible)
+      // that passed the anti-cheat engine may credit Challenges or Duels.
+      const ereaderSealed = body.medium === 'ebook' && Boolean(body.challengeEligible);
+      if (!body.challengeEligible || (!body.liveCameraVerified && !ereaderSealed)) {
         return NextResponse.json({
           creditedChallenges: 0,
           creditedDuels: 0,
-          reason: 'Live start/end camera scan + anti-cheat seal required for competitive points.',
+          reason:
+            'A live camera scan (or e-reader checkpoint seal) plus the anti-cheat seal is required for competitive points.',
         });
       }
 
       const mins = Math.max(0, Math.min(240, Number(body.verifiedMinutes) || 0));
       const pages = Math.max(0, Math.min(400, Number(body.verifiedPages) || 0));
-      const trust = Math.max(50, Math.min(100, Number(body.trustScore) || 85));
+      const trust = Math.max(500, Math.min(1000, Number(body.trustScore) || 850));
       const nowMs = Date.now();
       const nowIso = new Date().toISOString();
 

@@ -255,7 +255,9 @@ export interface SessionFlag {
     | 'comprehension_missed'
     | 'ocr_low_confidence'
     | 'duplicate_scan_frame'
-    | 'silent_audio_rejected';
+    | 'silent_audio_rejected'
+    | 'ereader_no_progress'
+    | 'ereader_attention_missed';
   severity: 'info' | 'soft' | 'escalated';
   label: string;
   explanation: string;
@@ -278,7 +280,10 @@ export interface ReadingSession {
   challenge_eligible?: boolean;
   challenge_id?: string | null;
   verification_tier: VerificationTier;
+  /** Honest Rate on the 0–1000 scale (1000 = fully consistent verified history). */
   trust_score: number;
+  /** Explicit scale marker so legacy 0–100 history can be lifted automatically. */
+  trust_scale?: number;
   predicted_minutes: number;
   actual_minutes: number;
   wpm_observed: number;
@@ -430,6 +435,9 @@ export interface ActivityFeedEvent {
     | 'duel_won';
   summary: string;
   trustScore?: number;
+  /** Spark counts (Booklit's "like" for verified activity). */
+  sparkCount?: number;
+  sparkedByMe?: boolean;
   createdAt: string;
 }
 
@@ -459,6 +467,9 @@ export interface PublicReaderProfile {
   followersCount: number;
   followingCount: number;
   isFollowing: boolean;
+  /** A "Tether" is mutual: both readers follow each other. */
+  isTethered?: boolean;
+  sparkCount?: number;
   currentlyReading: {
     title: string;
     author: string;
@@ -486,6 +497,10 @@ export interface SessionDraft {
   live_watch_room_id?: string | null;
   challenge_id?: string | null;
   duel_id?: string | null;
+  ereader_start_percent?: number | null;
+  ereader_checkpoint_verified?: boolean;
+  ereader_attention_checks?: number;
+  ereader_attention_checks_passed?: number;
   random_check_scheduled: boolean;
   random_check_completed: boolean;
   voice_check_result?: {

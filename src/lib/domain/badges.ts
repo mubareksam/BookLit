@@ -5,10 +5,12 @@ import {
   ReadingDuel,
   ReadingSession,
 } from '../types';
+import { normalizeTrustScore, TRUST_SCALE_MAX } from './trust';
 
 export function computeReaderRank(verifiedMinutes: number, avgTrustScore: number): string {
-  if (verifiedMinutes >= 2400 && avgTrustScore >= 90) return 'Grandmaster';
-  if (verifiedMinutes >= 900 && avgTrustScore >= 85) return 'Luminary';
+  const trust = normalizeTrustScore(avgTrustScore);
+  if (verifiedMinutes >= 2400 && trust >= 900) return 'Grandmaster';
+  if (verifiedMinutes >= 900 && trust >= 850) return 'Luminary';
   if (verifiedMinutes >= 300) return 'Scholar';
   if (verifiedMinutes >= 60) return 'Scribe';
   return 'Initiate';
@@ -35,6 +37,7 @@ export function computeAchievementBadges(params: {
 
   const verifiedSessions = sessions.filter((s) => s.verified && !s.strike_issued);
   const liveCamSessions = verifiedSessions.filter((s) => s.live_camera_verified);
+  const ereaderSessions = verifiedSessions.filter((s) => s.medium === 'ebook');
 
   const verifiedMinutesTotal = Math.round(
     verifiedSessions.reduce((acc, s) => acc + s.actual_minutes, 0)
@@ -46,9 +49,10 @@ export function computeAchievementBadges(params: {
   const avgTrustScore =
     verifiedSessions.length > 0
       ? Math.round(
-          verifiedSessions.reduce((acc, s) => acc + s.trust_score, 0) / verifiedSessions.length
+          verifiedSessions.reduce((acc, s) => acc + normalizeTrustScore(s.trust_score, s.trust_scale), 0) /
+            verifiedSessions.length
         )
-      : 100;
+      : TRUST_SCALE_MAX;
 
   // Distinct genres across verified sessions
   const booksById = new Map(books.map((b) => [b.id, b]));
@@ -115,14 +119,22 @@ export function computeAchievementBadges(params: {
       progressLabel: `${Math.min(500, verifiedPagesTotal)}/500p`,
     },
     {
+      id: 'ereader_seal',
+      label: 'Screen Reader',
+      description: '3+ verified e-reader checkpoint sessions (no page scan needed).',
+      tier: 'bronze',
+      unlocked: ereaderSessions.length >= 3,
+      progressLabel: `${Math.min(3, ereaderSessions.length)}/3 sessions`,
+    },
+    {
       id: 'high_trust',
       label: 'Trusted Seal',
-      description: '92+ average Trust Score across 5+ verified sessions.',
+      description: '920+ average Honest Rate across 5+ verified sessions.',
       tier: 'emerald',
-      unlocked: verifiedSessions.length >= 5 && avgTrustScore >= 92,
+      unlocked: verifiedSessions.length >= 5 && avgTrustScore >= 920,
       progressLabel:
         verifiedSessions.length >= 5
-          ? `${avgTrustScore}/92 trust`
+          ? `${avgTrustScore}/1000 honest`
           : `${verifiedSessions.length}/5 sessions`,
     },
     {

@@ -5,6 +5,7 @@ import { addDays, format } from 'date-fns';
 import { AlertTriangle, CheckCircle2, Play, ShieldCheck } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { formatMinutesHuman } from '@/lib/domain/speedModel';
+import { normalizeTrustScore } from '@/lib/domain/trust';
 
 export function SessionsAndVerificationView() {
   const { books, sessions, openSessionFlow } = useBooklit();
@@ -16,8 +17,11 @@ export function SessionsAndVerificationView() {
   );
 
   const avgTrust = useMemo(() => {
-    if (sessions.length === 0) return 100;
-    return Math.round(sessions.reduce((acc, s) => acc + s.trust_score, 0) / sessions.length);
+    if (sessions.length === 0) return 1000;
+    return Math.round(
+      sessions.reduce((acc, s) => acc + normalizeTrustScore(s.trust_score, s.trust_scale), 0) /
+        sessions.length
+    );
   }, [sessions]);
 
   const verifiedCount = useMemo(() => sessions.filter((s) => s.verified).length, [sessions]);
@@ -42,9 +46,10 @@ export function SessionsAndVerificationView() {
 
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
-          <div className="text-[11px] text-zinc-500">Avg Trust</div>
+          <div className="text-[11px] text-zinc-500">Honest Rate</div>
           <div className="font-mono text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
             {avgTrust}
+            <span className="text-[10px] font-normal text-zinc-400">/1000</span>
           </div>
         </div>
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
@@ -135,7 +140,7 @@ export function SessionsAndVerificationView() {
                       }`}
                     >
                       {s.verified && <CheckCircle2 className="w-3 h-3" />}
-                      {s.trust_score}
+                      {normalizeTrustScore(s.trust_score, s.trust_scale)}
                     </span>
                   </div>
                 </div>

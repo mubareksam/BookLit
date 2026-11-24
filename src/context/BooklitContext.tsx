@@ -41,6 +41,12 @@ import {
 } from '@/lib/db/dexie';
 import { estimateUserGenreSpeed } from '@/lib/domain/speedModel';
 import { findCurableStrikeSession, scoreReadingSession } from '@/lib/domain/verificationEngine';
+import {
+  applyThemePreference,
+  readStoredTheme,
+  storeThemePreference,
+  THEME_EVENT,
+} from '@/lib/theme';
 
 export type ActiveNavView =
   | 'dashboard'
@@ -65,6 +71,9 @@ interface CompleteSessionPayload {
   endScannedLive?: boolean;
   hasTier1ScanOrImport: boolean;
   strictChallengeMode?: boolean;
+  ereaderEndPercent?: number;
+  ereaderAttentionChecks?: number;
+  ereaderAttentionChecksPassed?: number;
   notes?: string;
 }
 
@@ -169,6 +178,8 @@ interface BooklitContextValue {
     liveWatchRoomId?: string | null;
     challengeId?: string | null;
     duelId?: string | null;
+    ereaderStartPercent?: number | null;
+    ereaderCheckpointVerified?: boolean;
     randomCheckScheduled: boolean;
   }) => Promise<SessionDraft>;
   updateSessionDraft: (draftId: string, patch: Partial<SessionDraft>) => Promise<void>;
@@ -203,7 +214,10 @@ interface BooklitContextValue {
     inviteCode?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
   declineDuel: (duelId: string) => Promise<void>;
+  /** Tether a reader (follow). Mutual tethers unlock closer comparison. */
   toggleFollowReader: (targetUserId: string) => Promise<void>;
+  /** Spark (like) a verified arena activity event. */
+  toggleSparkEvent: (eventId: string) => Promise<void>;
 
   // TBR
   addTbrItem: (params: {
@@ -474,20 +488,21 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     }
   }, [activeUserId, isOnline, refreshChallenges, refreshSocialAndDuels]);
 
-  // Theme preference
+  // Theme preference: profile first, then this device's saved choice, then system.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const pref = user?.settings_json.themePreference ?? 'system';
-    const root = document.documentElement;
+    const pref = user?.settings_json.themePreference ?? readStoredTheme();
     const mediaDark = window.matchMedia('(prefers-color-scheme: dark)');
 
-    const applyTheme = () => {
-      const shouldDark = pref === 'dark' || (pref === 'system' && mediaDark.matches);
-      root.classList.toggle('dark', shouldDark);
+    const apply = () => applyThemePreference(pref);
+    apply();
+    if (pref !== 'system') storeThemePreference(pref);
+    mediaDark.addEventListener('change', apply);
+    window.addEventListener(THEME_EVENT, apply);
+    return () => {
+      mediaDark.removeEventListener('change', apply);
+      window.removeEventListener(THEME_EVENT, apply);
     };
-    applyTheme();
-    mediaDark.addEventListener('change', applyTheme);
-    return () => mediaDark.removeEventListener('change', applyTheme);
   }, [user?.settings_json.themePreference]);
 
   // Separate In-App Foreground Usage Timer
@@ -789,6 +804,8 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       liveWatchRoomId?: string | null;
       challengeId?: string | null;
       duelId?: string | null;
+      ereaderStartPercent?: number | null;
+      ereaderCheckpointVerified?: boolean;
       randomCheckScheduled: boolean;
     }): Promise<SessionDraft> => {
       if (!activeUserId) throw new Error('Sign in required');
@@ -812,6 +829,10 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         live_watch_room_id: params.liveWatchRoomId ?? null,
         challenge_id: params.challengeId ?? null,
         duel_id: params.duelId ?? null,
+        ereader_start_percent: params.ereaderStartPercent ?? null,
+        ereader_checkpoint_verified: Boolean(params.ereaderCheckpointVerified),
+        ereader_attention_checks: 0,
+        ereader_attention_checks_passed: 0,
         random_check_scheduled: params.randomCheckScheduled,
         random_check_completed: false,
         voice_check_result: null,
@@ -894,6 +915,13 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         startFrameSignature: draft.start_frame_signature,
         endFrameSignature: payload.endFrameSignature,
         strictChallengeMode: payload.strictChallengeMode,
+        ereaderCheckpointVerified:
+          draft.medium === 'ebook' && Boolean(draft.ereader_checkpoint_verified),
+        ereaderStartPercent: draft.ereader_start_percent ?? undefined,
+        ereaderEndPercent: payload.ereaderEndPercent,
+        ereaderAttentionChecks: payload.ereaderAttentionChecks ?? draft.ereader_attention_checks ?? 0,
+        ereaderAttentionChecksPassed:
+          payload.ereaderAttentionChecksPassed ?? draft.ereader_attention_checks_passed ?? 0,
         backgroundSeconds: draft.background_seconds,
         focusTransitions: draft.focus_transitions,
         voiceCheck: draft.voice_check_result ?? null,
@@ -931,6 +959,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       }
 
       const liveBoth = Boolean(draft.start_scanned_live && payload.endScannedLive);
+      const ereaderSeal = draft.medium === 'ebook' && Boolean(draft.ereader_checkpoint_verified);
 
       const newSession: ReadingSession = {
         id: sessionId,
@@ -947,6 +976,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         challenge_id: draft.challenge_id ?? null,
         verification_tier: scoring.verificationTier,
         trust_score: scoring.trustScore,
+        trust_scale: scoring.trustScale,
         predicted_minutes: scoring.predictedMinutes,
         actual_minutes: scoring.actualMinutes,
         wpm_observed: scoring.wpmObserved,
@@ -1137,7 +1167,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         await flushSyncQueue(activeUserId);
 
         // Credit joined Challenges & 1v1 Duels if session passed strict live anti-cheat verification!
-        if (scoring.challengeEligible && liveBoth) {
+        if (scoring.challengeEligible && (liveBoth || ereaderSeal)) {
           await fetch('/api/challenges', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1149,7 +1179,8 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
               verifiedPages: pagesRead,
               trustScore: scoring.trustScore,
               bookTitle: book.title,
-              liveCameraVerified: true,
+              liveCameraVerified: liveBoth,
+              medium: draft.medium,
               challengeEligible: true,
             }),
           }).catch(() => {});
@@ -1297,6 +1328,45 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         });
         await refreshSocialAndDuels();
       } catch {}
+    },
+    [refreshSocialAndDuels]
+  );
+
+  const toggleSparkEvent = useCallback(
+    async (eventId: string): Promise<void> => {
+      // Optimistic spark so the tap feels instant even on a slow connection.
+      setActivityFeed((prev) =>
+        prev.map((ev) =>
+          ev.id === eventId
+            ? {
+                ...ev,
+                sparkedByMe: !ev.sparkedByMe,
+                sparkCount: Math.max(0, (ev.sparkCount ?? 0) + (ev.sparkedByMe ? -1 : 1)),
+              }
+            : ev
+        )
+      );
+      try {
+        const res = await fetch('/api/social', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'toggle_spark', eventId }),
+        });
+        if (!res.ok) {
+          await refreshSocialAndDuels();
+          return;
+        }
+        const data = (await res.json()) as { sparked: boolean; sparkCount: number };
+        setActivityFeed((prev) =>
+          prev.map((ev) =>
+            ev.id === eventId
+              ? { ...ev, sparkedByMe: data.sparked, sparkCount: data.sparkCount }
+              : ev
+          )
+        );
+      } catch {
+        // Offline: the optimistic state stays until the next refresh.
+      }
     },
     [refreshSocialAndDuels]
   );
@@ -1530,6 +1600,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     acceptDuel,
     declineDuel,
     toggleFollowReader,
+    toggleSparkEvent,
 
     addTbrItem,
     reorderTbrItems,

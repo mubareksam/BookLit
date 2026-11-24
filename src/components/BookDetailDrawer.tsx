@@ -6,6 +6,7 @@ import { BookOpen, Play, Star, X } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { Book, GENRE_META } from '@/lib/types';
 import { formatMinutesHuman, predictBookFinish } from '@/lib/domain/speedModel';
+import { normalizeTrustScore } from '@/lib/domain/trust';
 
 export function BookDetailDrawer() {
   const {
@@ -151,7 +152,9 @@ export function BookDetailDrawer() {
                       {format(new Date(s.ended_at), 'MMM d')} · {s.wpm_observed} wpm
                     </div>
                   </div>
-                  <span className="font-mono font-semibold text-emerald-600">{s.trust_score}</span>
+                  <span className="font-mono font-semibold text-emerald-600">
+                    {normalizeTrustScore(s.trust_score, s.trust_scale)}
+                  </span>
                 </div>
               ))}
             </div>

@@ -29,6 +29,7 @@ import {
   predictPageSpanMinutes,
 } from '@/lib/domain/speedModel';
 import { computeRandomVoiceCheckProbability } from '@/lib/domain/verificationEngine';
+import { normalizeTrustScore } from '@/lib/domain/trust';
 
 type FlowStep =
   | 'setup'
@@ -69,6 +70,14 @@ export function SessionRunnerModal() {
   const [medium, setMedium] = useState<ReadingMedium>('physical');
   const [startPage, setStartPage] = useState<number>(1);
   const [endPage, setEndPage] = useState<number>(10);
+
+  // E-Reader path: e-ink pages physically cannot be page-scanned, so Booklit
+  // verifies paced progress checkpoints + live presence taps + voice evidence.
+  const [ereaderStartPercent, setEreaderStartPercent] = useState<number>(0);
+  const [ereaderEndPercent, setEreaderEndPercent] = useState<number>(0);
+  const [presence, setPresence] = useState<{ checks: number; passes: number; pending: number | null }>(
+    { checks: 0, passes: 0, pending: null }
+  );
 
   // Live Camera Only state (NO file upload allowed!)
   const [scanTarget, setScanTarget] = useState<'start' | 'end'>('start');
@@ -138,6 +147,8 @@ export function SessionRunnerModal() {
       user?.settings_json.challengeMode
   );
 
+  const isEreader = medium === 'ebook';
+
   const stopCameraStream = () => {
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -158,6 +169,7 @@ export function SessionRunnerModal() {
     setGeneratedQuestion(null);
     setScanError(null);
     setVoiceError(null);
+    setPresence({ checks: 0, passes: 0, pending: null });
 
     if (activeDraft) {
       setSelectedBookId(activeDraft.book_id);
@@ -211,10 +223,15 @@ export function SessionRunnerModal() {
     );
   }, [currentBook, verifiedHistory, booksById]);
 
+  // Rolling honesty percentage (0–100) feeds the random voice-check probability,
+  // while the UI displays the 0–1000 Honest Rate scale.
   const rollingTrustScore = useMemo(() => {
     if (sessions.length === 0) return 88;
     const recent = sessions.slice(0, 6);
-    return Math.round(recent.reduce((acc, s) => acc + s.trust_score, 0) / recent.length);
+    const avg =
+      recent.reduce((acc, s) => acc + normalizeTrustScore(s.trust_score, s.trust_scale), 0) /
+      recent.length;
+    return Math.round(avg / 10);
   }, [sessions]);
 
   // Live reading stopwatch + passive visibility tracking
@@ -251,6 +268,25 @@ export function SessionRunnerModal() {
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [sessionModalOpen, step, activeDraft, updateSessionDraft]);
+
+  // E-Reader presence prompts: a gentle tap confirms the reader is still there.
+  useEffect(() => {
+    if (!sessionModalOpen || step !== 'live_reading' || medium !== 'ebook') return;
+    const id = window.setInterval(() => {
+      setPresence((prev) =>
+        prev.pending !== null ? prev : { ...prev, checks: prev.checks + 1, pending: Date.now() }
+      );
+    }, 60000);
+    return () => window.clearInterval(id);
+  }, [sessionModalOpen, step, medium]);
+
+  useEffect(() => {
+    if (presence.pending === null) return;
+    const id = window.setTimeout(() => {
+      setPresence((prev) => ({ ...prev, pending: null }));
+    }, 30000);
+    return () => window.clearTimeout(id);
+  }, [presence.pending]);
 
   // Reference passage: prefer actual OCR-scanned page text if extracted, else book sample passage
   const referenceExcerpt = useMemo(() => {
@@ -443,6 +479,39 @@ export function SessionRunnerModal() {
   };
 
   const handleBeginReading = async () => {
+    if (isEreader) {
+      const hasRecentVarianceE = sessions
+        .slice(0, 3)
+        .some((s) => s.flags_json.some((f) => f.code === 'pace_variance'));
+
+      await startSessionDraft({
+        bookId: currentBook.id,
+        medium: 'ebook',
+        startPage,
+        startScanConfidence: 0.8,
+        startFrameSignature: null,
+        startScannedLive: false,
+        ereaderStartPercent: Math.max(0, Math.min(100, ereaderStartPercent || 0)),
+        ereaderCheckpointVerified: true,
+        isCureAttemptFor: sessionModalCureTargetId,
+        challengeId: sessionModalChallengeId ?? activeChallenge?.id ?? null,
+        duelId: sessionModalDuelId ?? activeDuel?.id ?? null,
+        randomCheckScheduled:
+          strictChallengeActive ||
+          hasRecentVarianceE ||
+          Math.random() <
+            computeRandomVoiceCheckProbability({
+              rollingTrustScore,
+              hasRecentPaceVariance: hasRecentVarianceE,
+              activeStrikeCount: user?.strike_count ?? 0,
+            }),
+      });
+      setPresence({ checks: 0, passes: 0, pending: null });
+      setLiveSeconds(0);
+      setStep('live_reading');
+      return;
+    }
+
     if (strictChallengeActive && !startScanResult?.livenessValid) {
       setScanError('Challenge sessions require a live camera scan of your starting page.');
       return;
@@ -480,7 +549,7 @@ export function SessionRunnerModal() {
 
   const handleProceedAfterEndBoundary = async () => {
     if (!activeDraft) return;
-    if (strictChallengeActive && !endScanResult?.livenessValid) {
+    if (!isEreader && strictChallengeActive && !endScanResult?.livenessValid) {
       setScanError('Challenge sessions require a live camera scan of your ending page.');
       return;
     }
@@ -758,17 +827,23 @@ export function SessionRunnerModal() {
       : activeDraft;
 
     const liveEnd = Boolean(endScanResult?.livenessValid);
-    const hasTier1 = Boolean(activeDraft.start_scanned_live && liveEnd);
+    const ereaderSealed = mergedDraft.medium === 'ebook' && Boolean(mergedDraft.ereader_checkpoint_verified);
+    const hasTier1 = ereaderSealed || Boolean(activeDraft.start_scanned_live && liveEnd);
 
     const finished = await completeReadingSession({
       draft: mergedDraft,
       endPage: Math.max(activeDraft.start_page, endPage),
       endWordsOnPage: endScanResult?.estimatedWordsOnPage,
-      endScanConfidence: endScanResult?.confidence,
+      endScanConfidence: ereaderSealed ? 0.8 : endScanResult?.confidence,
       endFrameSignature: endScanResult?.frameSignature ?? null,
       endScannedLive: liveEnd,
       hasTier1ScanOrImport: hasTier1,
       strictChallengeMode: strictChallengeActive,
+      ereaderEndPercent: ereaderSealed
+        ? Math.max(ereaderStartPercent || 0, Math.min(100, ereaderEndPercent || 0))
+        : undefined,
+      ereaderAttentionChecks: ereaderSealed ? presence.checks : undefined,
+      ereaderAttentionChecksPassed: ereaderSealed ? presence.passes : undefined,
     });
     setCompletedResult(finished);
     setStep('result');
@@ -883,7 +958,63 @@ export function SessionRunnerModal() {
                 </div>
               )}
 
-              {/* Live Camera Scan Box (NO image upload!) */}
+              {/* E-Reader Checkpoint Box (e-ink pages cannot be page-scanned) */}
+              {isEreader && (
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                        E-Reader Checkpoint Seal
+                      </div>
+                      <p className="text-[11px] text-zinc-500">
+                        No page scan needed · paced progress + presence taps + voice
+                      </p>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-600/15 text-emerald-700 dark:text-emerald-300 font-semibold shrink-0">
+                      Kindle-safe
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] text-zinc-500 mb-1">Start page (device)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={currentBook.page_count}
+                        value={startPage}
+                        onChange={(e) =>
+                          setStartPage(
+                            Math.max(0, Math.min(currentBook.page_count, Number(e.target.value) || 0))
+                          )
+                        }
+                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 font-mono text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-500 mb-1">Book % read</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={ereaderStartPercent}
+                        onChange={(e) =>
+                          setEreaderStartPercent(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
+                        }
+                        className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2 font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    Tap to confirm a presence prompt while you read. Booklit checks impossible pace,
+                    missed presence taps, your live voice clip, and a passage question.
+                  </p>
+                </div>
+              )}
+
+              {/* Live Camera Scan Box (NO image upload!) — physical books only */}
+              {!isEreader && (
               <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
@@ -979,6 +1110,7 @@ export function SessionRunnerModal() {
                   </div>
                 )}
               </div>
+              )}
 
               <button
                 type="button"
@@ -1038,6 +1170,23 @@ export function SessionRunnerModal() {
                 <p className="text-[11px] text-zinc-400">
                   Lock your screen freely while reading—session draft is saved offline.
                 </p>
+
+                {isEreader && presence.pending !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setPresence((prev) => ({ ...prev, passes: prev.passes + 1, pending: null }))}
+                    className="w-full py-2.5 rounded-xl bg-amber-400 text-amber-950 text-xs font-bold animate-pulse"
+                  >
+                    Still reading? Tap to confirm
+                  </button>
+                )}
+
+                {isEreader && (
+                  <div className="text-[10px] text-zinc-500">
+                    E-reader seal · {presence.passes}/{presence.checks} presence taps · start{' '}
+                    {ereaderStartPercent}%
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-between gap-2">
@@ -1060,7 +1209,7 @@ export function SessionRunnerModal() {
                   }}
                   className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
                 >
-                  Finish & Scan End Page →
+                  {isEreader ? 'Finish & Log End Position →' : 'Finish & Scan End Page →'}
                 </button>
               </div>
             </div>
@@ -1071,7 +1220,9 @@ export function SessionRunnerModal() {
               <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <h3 className="text-xs font-semibold">End Page Live Scan</h3>
+                    <h3 className="text-xs font-semibold">
+                      {isEreader ? 'E-Reader End Checkpoint' : 'End Page Live Scan'}
+                    </h3>
                     <p className="text-[11px] text-zinc-500">
                       Started p.{activeDraft.start_page} · Elapsed {totalElapsedMinutes.toFixed(1)}m
                     </p>
@@ -1106,7 +1257,31 @@ export function SessionRunnerModal() {
                   </div>
                 )}
 
-                {!cameraActive && (
+                {isEreader && (
+                  <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
+                        Book % read now
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={ereaderEndPercent}
+                        onChange={(e) =>
+                          setEreaderEndPercent(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
+                        }
+                        className="w-16 rounded-lg border border-emerald-500/30 bg-white dark:bg-zinc-800 px-2 py-1 font-mono text-xs text-center"
+                      />
+                    </div>
+                    <p className="text-[10px] text-zinc-500">
+                      Presence taps {presence.passes}/{presence.checks} · pace must match your normal
+                      speed.
+                    </p>
+                  </div>
+                )}
+
+                {!isEreader && !cameraActive && (
                   <button
                     type="button"
                     onClick={() => requestCameraWithExplainer('end')}
@@ -1117,7 +1292,7 @@ export function SessionRunnerModal() {
                   </button>
                 )}
 
-                {cameraActive && scanTarget === 'end' && (
+                {!isEreader && cameraActive && scanTarget === 'end' && (
                   <div className="rounded-2xl overflow-hidden border border-zinc-300 dark:border-zinc-700 bg-black relative">
                     <video
                       ref={videoRef}
@@ -1432,8 +1607,8 @@ export function SessionRunnerModal() {
                   </div>
                   <div className="text-right shrink-0">
                     <div className="font-mono text-xl font-bold">
-                      {completedResult.trust_score}
-                      <span className="text-xs font-normal text-zinc-500">/100</span>
+                      {normalizeTrustScore(completedResult.trust_score, completedResult.trust_scale)}
+                      <span className="text-xs font-normal text-zinc-500">/1000</span>
                     </div>
                   </div>
                 </div>

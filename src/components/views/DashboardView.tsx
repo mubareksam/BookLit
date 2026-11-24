@@ -18,6 +18,7 @@ import {
 import { useBooklit } from '@/context/BooklitContext';
 import { GENRE_META } from '@/lib/types';
 import { predictBookFinish } from '@/lib/domain/speedModel';
+import { normalizeTrustScore } from '@/lib/domain/trust';
 import { computeAchievementBadges } from '@/lib/domain/badges';
 
 export function DashboardView() {
@@ -61,9 +62,12 @@ export function DashboardView() {
   );
 
   const avgTrust = useMemo(() => {
-    if (sessions.length === 0) return 100;
+    if (sessions.length === 0) return 1000;
     const recent = sessions.slice(0, 6);
-    return Math.round(recent.reduce((acc, s) => acc + s.trust_score, 0) / recent.length);
+    return Math.round(
+      recent.reduce((acc, s) => acc + normalizeTrustScore(s.trust_score, s.trust_scale), 0) /
+        recent.length
+    );
   }, [sessions]);
 
   const primaryPred = useMemo(() => {
@@ -265,9 +269,9 @@ export function DashboardView() {
             </div>
             <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/70 p-2.5">
               <div className="text-[11px] text-zinc-500 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3 text-emerald-600" /> Trust
+                <ShieldCheck className="w-3 h-3 text-emerald-600" /> Honest
               </div>
-              <div className="font-mono text-sm font-bold mt-0.5">{avgTrust}/100</div>
+              <div className="font-mono text-sm font-bold mt-0.5">{avgTrust}/1000</div>
             </div>
           </div>
         </div>
@@ -380,7 +384,7 @@ export function DashboardView() {
                         : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
                     }`}
                   >
-                    {s.trust_score}
+                    {normalizeTrustScore(s.trust_score, s.trust_scale)}
                   </span>
                 </div>
               );

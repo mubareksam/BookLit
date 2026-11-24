@@ -7,6 +7,9 @@ import {
   scoreReadingSession,
 } from '../src/lib/domain/verificationEngine';
 import { computeSignatureDistance } from '../src/lib/domain/ocrService';
+import { normalizeTrustScore, toTrustPercent } from '../src/lib/domain/trust';
+import { scoreField } from '../src/lib/domain/fuzzySearch';
+import { searchCatalog } from '../src/lib/domain/catalog';
 import { generateBookRecommendations } from '../src/lib/domain/recommendationEngine';
 import { computeAchievementBadges, computeReaderRank } from '../src/lib/domain/badges';
 import {
@@ -313,7 +316,133 @@ function runDomainTests() {
   assert.equal(badgeResult.badges.find((b) => b.id === 'seven_day_flame')?.unlocked, true);
   assert.equal(badgeResult.badges.find((b) => b.id === 'duel_victor')?.unlocked, true);
 
-  console.log('✓ All 10 Booklit v3 social, 1v1 duel & anti-cheat invariants verified.');
+  // 11. Honest Rate lives on a 1000-point scale (100 was too coarse)
+  const verifiedScoring = scoreReadingSession({
+    medium: 'physical',
+    book: litBook,
+    wpmBand: litSpeed,
+    startedAtIso: '2026-11-24T14:00:00Z',
+    endedAtIso: '2026-11-24T14:20:00Z',
+    monotonicElapsedSeconds: 20 * 60,
+    startPage: 100,
+    endPage: 120,
+    hasTier1ScanOrImport: true,
+    liveCameraStart: true,
+    liveCameraEnd: true,
+    startFrameSignature: 'a0f0a0f0a0f0a0f0',
+    endFrameSignature: '0f050f050f050f05',
+    strictChallengeMode: true,
+    voiceCheck: {
+      result: 'pass',
+      confidence: 0.9,
+      matchedRatio: 0.85,
+      wps: 2.4,
+      whisperMode: false,
+      rmsVoiceDetected: true,
+      explanation: 'Natural cadence',
+    },
+    recentVerificationEvents7d: [],
+    recentSessions7d: [],
+  });
+  assert.equal(verifiedScoring.trustScale, 1000);
+  assert(verifiedScoring.trustScore > 100);
+  assert(verifiedScoring.trustScore <= 1000);
+  assert.equal(normalizeTrustScore(94), 940);
+  assert.equal(normalizeTrustScore(940, 1000), 940);
+  assert.equal(toTrustPercent(940), 94);
+
+  // 12. E-Reader seal: no page scan possible, so paced checkpoints + presence +
+  //     voice + comprehension must still verify and stay challenge eligible.
+  const ereaderScoring = scoreReadingSession({
+    medium: 'ebook',
+    book: litBook,
+    wpmBand: litSpeed,
+    startedAtIso: '2026-11-24T15:00:00Z',
+    endedAtIso: '2026-11-24T15:22:00Z',
+    monotonicElapsedSeconds: 22 * 60,
+    startPage: 200,
+    endPage: 222,
+    hasTier1ScanOrImport: false,
+    liveCameraStart: false,
+    liveCameraEnd: false,
+    ereaderCheckpointVerified: true,
+    ereaderStartPercent: 42,
+    ereaderEndPercent: 51,
+    ereaderAttentionChecks: 2,
+    ereaderAttentionChecksPassed: 2,
+    strictChallengeMode: true,
+    voiceCheck: {
+      result: 'pass',
+      confidence: 0.88,
+      matchedRatio: 0.8,
+      wps: 2.5,
+      whisperMode: false,
+      rmsVoiceDetected: true,
+      explanation: 'Live voice confirmed',
+    },
+    comprehensionCheck: { result: 'pass', confidence: 0.95, explanation: 'Correct passage answer' },
+    recentVerificationEvents7d: [],
+    recentSessions7d: [],
+  });
+  assert.equal(ereaderScoring.verified, true);
+  assert.equal(ereaderScoring.challengeEligible, true);
+  assert(ereaderScoring.flags.every((f) => f.severity !== 'escalated'));
+
+  // E-reader sessions with no position progress can never verify
+  const ereaderStalled = scoreReadingSession({
+    medium: 'ebook',
+    book: litBook,
+    wpmBand: litSpeed,
+    startedAtIso: '2026-11-24T15:00:00Z',
+    endedAtIso: '2026-11-24T15:20:00Z',
+    monotonicElapsedSeconds: 20 * 60,
+    startPage: 200,
+    endPage: 200,
+    hasTier1ScanOrImport: false,
+    ereaderCheckpointVerified: true,
+    ereaderStartPercent: 40,
+    ereaderEndPercent: 40,
+    recentVerificationEvents7d: [],
+    recentSessions7d: [],
+  });
+  assert.equal(ereaderStalled.verified, false);
+  assert(ereaderStalled.flags.some((f) => f.code === 'ereader_no_progress'));
+
+  // E-reader readers who only track "% read" (no page numbers) still verify
+  const ereaderPercentOnly = scoreReadingSession({
+    medium: 'ebook',
+    book: litBook,
+    wpmBand: litSpeed,
+    startedAtIso: '2026-11-24T16:00:00Z',
+    endedAtIso: '2026-11-24T16:25:00Z',
+    monotonicElapsedSeconds: 25 * 60,
+    startPage: 45,
+    endPage: 45,
+    hasTier1ScanOrImport: false,
+    ereaderCheckpointVerified: true,
+    ereaderStartPercent: 20,
+    ereaderEndPercent: 38,
+    ereaderAttentionChecks: 2,
+    ereaderAttentionChecksPassed: 2,
+    recentVerificationEvents7d: [],
+    recentSessions7d: [],
+  });
+  assert.equal(ereaderPercentOnly.verified, true);
+  assert.equal(ereaderPercentOnly.strikeIssued, false);
+
+  // 13. Add Book search is fuzzy (typos, partials, authors) — never exact-only
+  assert(scoreField('Project Hail Mary', 'project hail') > 0.9);
+  assert(scoreField('Thinking, Fast and Slow', 'thinkng fast') >= 0.62);
+  assert(scoreField('Daniel Kahneman', 'kahnman') >= 0.62);
+  const fuzzySearch = searchCatalog('project hail mary');
+  assert(fuzzySearch.length > 0);
+  assert.equal(fuzzySearch[0].title, 'Project Hail Mary');
+  const typoSearch = searchCatalog('meditatons');
+  assert(typoSearch.some((b) => b.title === 'Meditations'));
+  assert(searchCatalog('kahneman').some((b) => b.author.includes('Kahneman')));
+  assert(searchCatalog('zzzzzz').length === 0);
+
+  console.log('✓ All 13 Booklit v3 social, 1v1 duel, e-reader & anti-cheat invariants verified.');
 }
 
 runDomainTests();

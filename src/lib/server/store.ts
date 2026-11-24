@@ -33,6 +33,8 @@ export interface ServerDataShape {
   challenges: Record<string, ReadingChallenge>;
   duels: Record<string, ReadingDuel>;
   followsByUserId: Record<string, string[]>;
+  /** Sparks (Booklit's verified "like") keyed by activity event id → user ids. */
+  sparksByEventId: Record<string, string[]>;
   activityFeed: ActivityFeedEvent[];
 }
 
@@ -49,6 +51,7 @@ function createEmptyStore(): ServerDataShape {
     challenges: {},
     duels: {},
     followsByUserId: {},
+    sparksByEventId: {},
     activityFeed: [],
   };
 }
@@ -69,6 +72,7 @@ export function readServerStore(): ServerDataShape {
       challenges: parsed.challenges ?? {},
       duels: parsed.duels ?? {},
       followsByUserId: parsed.followsByUserId ?? {},
+      sparksByEventId: parsed.sparksByEventId ?? {},
       activityFeed: Array.isArray(parsed.activityFeed) ? parsed.activityFeed : [],
     };
   } catch {

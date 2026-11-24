@@ -1,14 +1,19 @@
 {
-  "name": "Booklit — Verified Reading Habit Coach",
+  "name": "Booklit \u2014 Verified Reading Habit Coach",
   "short_name": "Booklit",
-  "description": "Offline-first verified reading habit platform across physical books and e-readers.",
-  "start_url": "/?pwa=1",
+  "description": "Verified reading habit platform: live page scans for physical books, checkpoint seals for e-readers, honest-rate scoring, 1v1 duels and sparks.",
+  "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#090A0D",
-  "theme_color": "#1F7A53",
-  "categories": ["books", "education", "productivity", "lifestyle"],
+  "theme_color": "#0F766E",
+  "categories": [
+    "books",
+    "education",
+    "productivity",
+    "lifestyle"
+  ],
   "icons": [
     {
       "src": "/icons/icon-192.svg",
@@ -29,14 +34,32 @@
       "short_name": "Scan Page",
       "description": "Start a verified physical or e-reader reading session",
       "url": "/?action=start-session",
-      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml" }]
+      "icons": [
+        {
+          "src": "/icons/icon-192.svg",
+          "sizes": "192x192",
+          "type": "image/svg+xml"
+        }
+      ]
     },
     {
       "name": "To-Be-Read Queue",
       "short_name": "TBR",
       "description": "Open your planned reading queue",
       "url": "/?view=tbr",
-      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml" }]
+      "icons": [
+        {
+          "src": "/icons/icon-192.svg",
+          "sizes": "192x192",
+          "type": "image/svg+xml"
+        }
+      ]
     }
-  ]
+  ],
+  "id": "/",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "prefer_related_applications": false
 }

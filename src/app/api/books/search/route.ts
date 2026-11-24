@@ -1,21 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { CatalogBookSeed, searchCatalog } from '@/lib/domain/catalog';
+import {
+  catalogSuggestions,
+  RankedCatalogBook,
+  searchCatalogRanked,
+} from '@/lib/domain/catalog';
+import { classifyMatch } from '@/lib/domain/fuzzySearch';
 import { BookGenre } from '@/lib/types';
 
 export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get('q') ?? '';
   const genre = (req.nextUrl.searchParams.get('genre') ?? 'all') as BookGenre | 'all';
 
-  const localResults = searchCatalog(query, genre);
+  const localResults = searchCatalogRanked(query, genre);
+  const trimmed = query.trim();
 
-  // Also query live Open Library API on deployed instances when query has >= 3 chars
-  if (query.trim().length >= 3) {
+  // Also query the live Open Library API on deployed instances (>= 3 chars).
+  if (trimmed.length >= 3) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
+      const timeout = setTimeout(() => controller.abort(), 2500);
       const olRes = await fetch(
         `https://openlibrary.org/search.json?q=${encodeURIComponent(
-          query.trim()
+          trimmed
         )}&limit=8&fields=key,title,author_name,isbn,number_of_pages_median,subject`,
         { signal: controller.signal }
       );
@@ -33,7 +39,7 @@ export async function GET(req: NextRequest) {
           }[];
         };
 
-        const remoteMapped: CatalogBookSeed[] = (olData.docs ?? [])
+        const remoteMapped: RankedCatalogBook[] = (olData.docs ?? [])
           .filter((d) => d.title)
           .map((doc, idx) => {
             const pages = Math.max(40, Math.min(2000, doc.number_of_pages_median || 280));
@@ -46,11 +52,15 @@ export async function GET(req: NextRequest) {
               subgenre: (doc.subject ?? []).slice(0, 2),
               page_count: pages,
               word_count_estimate: pages * 280,
-              difficulty_band: 3,
+              difficulty_band: 3 as const,
               cover_color: '#0f766e',
               description: '',
-              source: 'OpenLibrary',
+              source: 'OpenLibrary' as const,
               sample_passages: [],
+              // Open Library already ran its own relevance ranking for this query.
+              matchScore: 0.61,
+              matchKind: classifyMatch(0.61),
+              matchedOn: 'title' as const,
             };
           });
 
@@ -59,12 +69,20 @@ export async function GET(req: NextRequest) {
           ...localResults,
           ...remoteMapped.filter((r) => !seen.has(r.title.toLowerCase())),
         ];
-        return NextResponse.json({ results: merged.slice(0, 14) });
+        return NextResponse.json({
+          query: trimmed,
+          results: merged.slice(0, 16),
+          suggestions: [],
+        });
       }
     } catch {
       // Fallback to built-in catalog when offline or sandboxed
     }
   }
 
-  return NextResponse.json({ results: localResults });
+  return NextResponse.json({
+    query: trimmed,
+    results: localResults,
+    suggestions: localResults.length === 0 ? catalogSuggestions(4) : [],
+  });
 }

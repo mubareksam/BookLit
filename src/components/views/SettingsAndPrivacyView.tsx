@@ -7,11 +7,14 @@ import {
   Lock,
   LogOut,
   ShieldCheck,
+  Smartphone,
   Trash2,
   UserCheck,
 } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { ReadingGoalType } from '@/lib/types';
+import { ThemeToggle } from '@/components/ThemeToggle';
+import { InstallAppButton, usePwaInstallState } from '@/components/InstallAppButton';
 
 export function SettingsAndPrivacyView() {
   const {
@@ -33,6 +36,7 @@ export function SettingsAndPrivacyView() {
   );
   const [goalTarget, setGoalTarget] = useState<number>(user?.reading_goal_target ?? 30);
   const [savedToast, setSavedToast] = useState(false);
+  const installState = usePwaInstallState();
   const [confirmDeleteText, setConfirmDeleteText] = useState('');
 
   useEffect(() => {
@@ -131,7 +135,7 @@ export function SettingsAndPrivacyView() {
               className="w-full min-w-0 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs"
             >
               <option value="public">Public (@{user.username})</option>
-              <option value="private">Followers Only</option>
+              <option value="private">Tetherers Only</option>
             </select>
           </div>
         </div>
@@ -207,6 +211,34 @@ export function SettingsAndPrivacyView() {
           </div>
         </div>
       </form>
+
+      {/* App & Appearance */}
+      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-3 min-w-0">
+        <div className="flex items-center gap-2 text-xs font-semibold">
+          <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>App & Appearance</span>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium">Theme</div>
+            <p className="text-[11px] text-zinc-500">Light, dark, or follow your device.</p>
+          </div>
+          <ThemeToggle />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+          <div className="min-w-0">
+            <div className="text-xs font-medium">Install the app</div>
+            <p className="text-[11px] text-zinc-500">
+              {installState.isInstalled
+                ? 'Booklit is installed on this device.'
+                : 'Home-screen icon, full-screen reading, offline drafts.'}
+            </p>
+          </div>
+          <InstallAppButton />
+        </div>
+      </div>
 
       {/* Verification & Privacy Toggles */}
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-4 min-w-0">

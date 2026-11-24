@@ -13,6 +13,7 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  Sparkles,
   Swords,
   Trophy,
   UserCheck,
@@ -38,6 +39,7 @@ export function ChallengesView() {
     acceptDuel,
     declineDuel,
     toggleFollowReader,
+    toggleSparkEvent,
     refreshSocialAndDuels,
     setSelectedReaderUsername,
     openSessionFlow,
@@ -657,14 +659,16 @@ export function ChallengesView() {
                   setReaderSearch(e.target.value);
                   refreshSocialAndDuels(e.target.value);
                 }}
-                placeholder="Find readers by @username or name…"
+                placeholder="Find readers by @username, name, or rank…"
                 className="flex-1 min-w-0 bg-transparent text-xs focus:outline-none"
               />
             </form>
 
             {readers.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-zinc-200 dark:border-zinc-800 p-8 text-center text-xs text-zinc-500">
-                No other public readers found yet—invite friends to join Booklit.
+                {readerSearch.trim()
+                  ? `No reader matches “${readerSearch.trim()}”. Try fewer letters or their exact @username.`
+                  : 'No other public readers yet—tether a friend once they join Booklit.'}
               </div>
             ) : (
               <div className="space-y-2.5">
@@ -691,6 +695,9 @@ export function ChallengesView() {
                         <div className="text-[11px] text-zinc-500 truncate">
                           @{r.username} · {r.verifiedMinutesTotal}m verified · {r.duelWins}W–
                           {r.duelLosses}L
+                          {typeof r.sparkCount === 'number' && r.sparkCount > 0
+                            ? ` · ${r.sparkCount} sparks`
+                            : ''}
                         </div>
                       </div>
                     </button>
@@ -718,11 +725,12 @@ export function ChallengesView() {
                       >
                         {r.isFollowing ? (
                           <>
-                            <UserCheck className="w-3 h-3" /> Following
+                            <UserCheck className="w-3 h-3" />
+                            {r.isTethered ? 'Tethered' : 'Tethering'}
                           </>
                         ) : (
                           <>
-                            <UserPlus className="w-3 h-3" /> Follow
+                            <UserPlus className="w-3 h-3" /> Tether
                           </>
                         )}
                       </button>
@@ -738,6 +746,9 @@ export function ChallengesView() {
             <div className="flex items-center gap-1.5 text-xs font-semibold">
               <Activity className="w-3.5 h-3.5 text-emerald-600" />
               <span>Live Arena Feed</span>
+              <span className="ml-auto text-[10px] font-normal text-zinc-400">
+                Sparks = verified likes
+              </span>
             </div>
 
             {activityFeed.length === 0 ? (
@@ -747,7 +758,7 @@ export function ChallengesView() {
             ) : (
               <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
                 {activityFeed.slice(0, 14).map((ev) => (
-                  <div key={ev.id} className="py-2.5 text-xs space-y-0.5 min-w-0">
+                  <div key={ev.id} className="py-2.5 text-xs space-y-1.5 min-w-0">
                     <div className="leading-snug break-words">
                       <button
                         type="button"
@@ -762,9 +773,25 @@ export function ChallengesView() {
                       <span>
                         {formatDistanceToNow(new Date(ev.createdAt), { addSuffix: true })}
                       </span>
-                      {ev.trustScore && (
-                        <span className="font-mono text-emerald-600">Trust {ev.trustScore}</span>
+                      {typeof ev.trustScore === 'number' && (
+                        <span className="font-mono text-emerald-600">
+                          Honest {ev.trustScore}/1000
+                        </span>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => toggleSparkEvent(ev.id)}
+                        aria-pressed={Boolean(ev.sparkedByMe)}
+                        aria-label={ev.sparkedByMe ? 'Remove spark' : 'Spark this activity'}
+                        className={`ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-semibold transition ${
+                          ev.sparkedByMe
+                            ? 'border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                            : 'border-zinc-200 dark:border-zinc-700 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        <Sparkles className="w-3 h-3" />
+                        {ev.sparkCount ?? 0}
+                      </button>
                     </div>
                   </div>
                 ))}

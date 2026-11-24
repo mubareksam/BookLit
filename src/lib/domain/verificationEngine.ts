@@ -9,6 +9,7 @@ import {
 } from '../types';
 import { GenreSpeedEstimate, predictPageSpanMinutes } from './speedModel';
 import { computeSignatureDistance } from './ocrService';
+import { toTrustScale } from './trust';
 
 export interface SpeechVerificationEvaluation {
   result: VerificationResult;
@@ -38,6 +39,13 @@ export interface SessionScoringInput {
   startFrameSignature?: string | null;
   endFrameSignature?: string | null;
   strictChallengeMode?: boolean;
+  /** E-Reader / Kindle path: page scans are impossible, so Booklit verifies paced
+   *  progress checkpoints + voice presence instead of an OCR page scan. */
+  ereaderCheckpointVerified?: boolean;
+  ereaderStartPercent?: number;
+  ereaderEndPercent?: number;
+  ereaderAttentionChecks?: number;
+  ereaderAttentionChecksPassed?: number;
   backgroundSeconds?: number;
   focusTransitions?: number;
   voiceCheck?: {
@@ -59,7 +67,9 @@ export interface SessionScoringInput {
 }
 
 export interface SessionScoringOutput {
+  /** Honest Rate on the 0–1000 scale. */
   trustScore: number;
+  trustScale: number;
   verified: boolean;
   challengeEligible: boolean;
   creditMultiplier: 1 | 0.5 | 0;
@@ -228,7 +238,20 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
   const wallMinutes = Math.max(0.25, (endMs - startMs) / 60000);
   const actualMinutes = Math.round(wallMinutes * 100) / 100;
 
-  const pagesRead = Math.max(0, input.endPage - input.startPage);
+  let pagesRead = Math.max(0, input.endPage - input.startPage);
+
+  // E-Readers usually expose a percentage, not page numbers. When a reader logs
+  // progress as "% read" only, convert that delta into a page equivalent so the
+  // session can still be verified and paced against their speed model.
+  if (
+    pagesRead <= 0 &&
+    input.ereaderCheckpointVerified &&
+    (input.ereaderEndPercent ?? 0) > (input.ereaderStartPercent ?? 0)
+  ) {
+    const pctDelta = (input.ereaderEndPercent ?? 0) - (input.ereaderStartPercent ?? 0);
+    pagesRead = Math.max(1, Math.round((input.book.page_count * pctDelta) / 100));
+  }
+
   const defaultWordsPerPage =
     input.book.page_count > 0 ? input.book.word_count_estimate / input.book.page_count : 280;
   const wordsPerPage =
@@ -245,8 +268,15 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
   const wpmObserved =
     pagesRead > 0 ? Math.round((pagesRead * wordsPerPage) / Math.max(0.25, actualMinutes)) : 0;
 
-  let trustScore = input.hasTier1ScanOrImport ? 86 : 74;
-  let verificationTier: VerificationTier = input.hasTier1ScanOrImport ? 'passive' : 'none';
+  const ereaderSeal = Boolean(input.ereaderCheckpointVerified);
+  const baseTrustScore = input.hasTier1ScanOrImport ? 86 : ereaderSeal ? 80 : 74;
+
+  let trustScore = baseTrustScore;
+  let verificationTier: VerificationTier = input.hasTier1ScanOrImport
+    ? 'passive'
+    : ereaderSeal
+    ? 'passive'
+    : 'none';
   let shouldEscalateNextSession = false;
   let clockAnomaly = false;
   let duplicateFrameDetected = false;
@@ -314,6 +344,41 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
       explanation: `${focusSwitches} rapid app switches logged (soft note only).`,
       cureHint: 'Lock your screen while reading physical books to stay focused.',
     });
+  }
+
+  // --- E-READER PATH: Paced Progress Checkpoints (no OCR page scan possible on e-ink) ---
+  if (ereaderSeal) {
+    verificationTier = 'active';
+    const startPct = Math.max(0, Math.min(100, input.ereaderStartPercent ?? 0));
+    const endPct = Math.max(0, Math.min(100, input.ereaderEndPercent ?? 0));
+    const progressed = endPct > startPct;
+
+    if (!progressed && pagesRead <= 0) {
+      trustScore -= 26;
+      independentAdverseSignals.push('ereader_no_progress');
+      flags.push({
+        code: 'ereader_no_progress',
+        severity: 'escalated',
+        label: 'No E-Reader Progress',
+        explanation: 'End position never advanced past your start position.',
+        cureHint: 'Record the reading percentage shown on your e-reader at start and at end.',
+      });
+    }
+
+    const attentionChecks = input.ereaderAttentionChecks ?? 0;
+    const attentionPassed = input.ereaderAttentionChecksPassed ?? attentionChecks;
+    if (attentionChecks > 0 && attentionPassed < attentionChecks) {
+      trustScore -= 14;
+      flags.push({
+        code: 'ereader_attention_missed',
+        severity: 'soft',
+        label: 'Missed E-Reader Presence Check',
+        explanation: `${attentionChecks - attentionPassed} of ${attentionChecks} mid-session presence taps were missed.`,
+        cureHint: 'Tap the presence prompt that appears while you read on your e-reader.',
+      });
+    } else if (attentionChecks > 0) {
+      trustScore += 5;
+    }
   }
 
   // --- TIER 1: Live Scan Boundary Tolerance (±35%) ---
@@ -439,10 +504,11 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
     !clockAnomaly &&
     trustScore >= 58 &&
     pagesRead > 0 &&
-    input.hasTier1ScanOrImport;
+    (input.hasTier1ScanOrImport || ereaderSeal);
 
   // Competitive Challenge Eligibility: strictly requires BOTH live camera scans, distinct frames, real timer, and voice check when strict mode is active
   const bothLiveScans = Boolean(input.liveCameraStart && input.liveCameraEnd);
+  const liveScanBoundary = bothLiveScans || ereaderSeal;
   const voicePassedForStrict = input.strictChallengeMode
     ? Boolean(
         input.voiceCheck &&
@@ -453,7 +519,7 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
 
   const challengeEligible =
     verified &&
-    bothLiveScans &&
+    liveScanBoundary &&
     !duplicateFrameDetected &&
     !clockAnomaly &&
     actualMinutes >= 3 &&
@@ -463,8 +529,8 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
 
   let summaryMessage = verified
     ? 'Verified session recorded.'
-    : !input.hasTier1ScanOrImport
-    ? 'Logged as unverified progress (live camera scan required for verification & challenges).'
+    : !input.hasTier1ScanOrImport && !ereaderSeal
+    ? 'Logged as unverified progress (live camera scan or e-reader checkpoint required).'
     : 'Session flagged—review signal details below.';
 
   if (strikeIssued) {
@@ -473,7 +539,8 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
   }
 
   return {
-    trustScore,
+    trustScore: toTrustScale(trustScore),
+    trustScale: 1000,
     verified,
     challengeEligible,
     creditMultiplier,

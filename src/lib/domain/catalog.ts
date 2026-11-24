@@ -1,4 +1,5 @@
 import { BookGenre, PassageSample } from '../types';
+import { classifyMatch, MatchKind, normalizeQuery, scoreField } from './fuzzySearch';
 
 export interface CatalogBookSeed {
   catalogId: string;
@@ -510,19 +511,400 @@ export const CATALOG_BOOKS: CatalogBookSeed[] = [
   },
 ];
 
+const POPULAR_BOOKS: Array<Omit<CatalogBookSeed, 'sample_passages'> & { sample_passages?: PassageSample[] }> = [
+  {
+    catalogId: 'cat-atomic-habits',
+    title: 'Atomic Habits',
+    author: 'James Clear',
+    isbn: '9780735211292',
+    genre: ['general_nonfiction'],
+    subgenre: ['Habit Formation', 'Behavior Change'],
+    page_count: 320,
+    word_count_estimate: 82000,
+    difficulty_band: 2,
+    cover_color: '#0f766e',
+    description:
+      'Practical framework for building tiny habits through cue, craving, response, and reward loops with environment design.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-dune',
+    title: 'Dune',
+    author: 'Frank Herbert',
+    isbn: '9780441172719',
+    genre: ['fiction'],
+    subgenre: ['Science Fiction', 'Epic'],
+    page_count: 658,
+    word_count_estimate: 188000,
+    difficulty_band: 4,
+    cover_color: '#b45309',
+    description:
+      'Desert planet Arrakis, spice trade, feudal houses, ecology, and prophecy collide in this science-fiction epic.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-sapiens',
+    title: 'Sapiens: A Brief History of Humankind',
+    author: 'Yuval Noah Harari',
+    isbn: '9780062316097',
+    genre: ['history', 'general_nonfiction'],
+    subgenre: ['Big History', 'Anthropology'],
+    page_count: 498,
+    word_count_estimate: 165000,
+    difficulty_band: 3,
+    cover_color: '#9a3412',
+    description:
+      'Sweeping account of Homo sapiens from foraging bands to empires, money, religion, and modern science.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-1984',
+    title: 'Nineteen Eighty-Four',
+    author: 'George Orwell',
+    isbn: '9780451524935',
+    genre: ['fiction', 'literary_fiction'],
+    subgenre: ['Dystopian', 'Political Fiction'],
+    page_count: 328,
+    word_count_estimate: 89000,
+    difficulty_band: 3,
+    cover_color: '#1f2937',
+    description:
+      'Winston Smith navigates surveillance, language control, and doublethink inside the totalitarian state of Oceania.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-deep-work',
+    title: 'Deep Work',
+    author: 'Cal Newport',
+    isbn: '9781455586691',
+    genre: ['general_nonfiction', 'technical'],
+    subgenre: ['Productivity', 'Focus'],
+    page_count: 304,
+    word_count_estimate: 76000,
+    difficulty_band: 2,
+    cover_color: '#065f46',
+    description:
+      'Rules for cultivating distraction-free concentration and producing high-value cognitive work.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-normal-people',
+    title: 'Normal People',
+    author: 'Sally Rooney',
+    isbn: '9781984822178',
+    genre: ['literary_fiction'],
+    subgenre: ['Contemporary Literary', 'Coming of Age'],
+    page_count: 288,
+    word_count_estimate: 71000,
+    difficulty_band: 2,
+    cover_color: '#7c3aed',
+    description:
+      'Connell and Marianne drift in and out of each other’s lives through school, university, and class difference.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-alchemist',
+    title: 'The Alchemist',
+    author: 'Paulo Coelho',
+    isbn: '9780061122415',
+    genre: ['light_fiction', 'philosophy'],
+    subgenre: ['Fable', 'Quest'],
+    page_count: 208,
+    word_count_estimate: 45000,
+    difficulty_band: 1,
+    cover_color: '#ca8a04',
+    description:
+      'A shepherd boy travels from Andalusia to the Egyptian pyramids chasing a recurring dream and a personal legend.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-man-search-meaning',
+    title: "Man's Search for Meaning",
+    author: 'Viktor E. Frankl',
+    isbn: '9780807014295',
+    genre: ['philosophy', 'general_nonfiction'],
+    subgenre: ['Existentialism', 'Memoir'],
+    page_count: 192,
+    word_count_estimate: 48000,
+    difficulty_band: 3,
+    cover_color: '#334155',
+    description:
+      'Psychiatrist’s concentration-camp testimony and logotherapy argument that meaning sustains survival.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-ikigai',
+    title: 'Ikigai',
+    author: 'Héctor García & Francesc Miralles',
+    isbn: '9780143130727',
+    genre: ['general_nonfiction', 'philosophy'],
+    subgenre: ['Japanese Culture', 'Wellbeing'],
+    page_count: 208,
+    word_count_estimate: 42000,
+    difficulty_band: 2,
+    cover_color: '#0d9488',
+    description:
+      'Longevity lessons from Okinawa: purpose, small daily joys, community, and gentle movement.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-clean-code',
+    title: 'Clean Code',
+    author: 'Robert C. Martin',
+    isbn: '9780132350884',
+    genre: ['technical'],
+    subgenre: ['Software Craftsmanship', 'Refactoring'],
+    page_count: 464,
+    word_count_estimate: 132000,
+    difficulty_band: 4,
+    cover_color: '#1e3a8a',
+    description:
+      'Guidance on naming, functions, formatting, error handling, and disciplined refactoring for maintainable code.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-pragmatic-programmer',
+    title: 'The Pragmatic Programmer',
+    author: 'Andrew Hunt & David Thomas',
+    isbn: '9780135957059',
+    genre: ['technical'],
+    subgenre: ['Software Engineering', 'Career'],
+    page_count: 352,
+    word_count_estimate: 98000,
+    difficulty_band: 3,
+    cover_color: '#7c2d12',
+    description:
+      'Timeless engineering habits: DRY, orthogonality, tracer bullets, automation, and honest estimation.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-psychology-money',
+    title: 'The Psychology of Money',
+    author: 'Morgan Housel',
+    isbn: '9780857197689',
+    genre: ['general_nonfiction'],
+    subgenre: ['Finance', 'Behavioral Economics'],
+    page_count: 256,
+    word_count_estimate: 62000,
+    difficulty_band: 2,
+    cover_color: '#166534',
+    description:
+      'Twenty short essays on luck, risk, compounding, and why financial behavior beats financial knowledge.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-educators',
+    title: 'Educated',
+    author: 'Tara Westover',
+    isbn: '9780399590504',
+    genre: ['general_nonfiction'],
+    subgenre: ['Memoir', 'Education'],
+    page_count: 352,
+    word_count_estimate: 104000,
+    difficulty_band: 3,
+    cover_color: '#3b82f6',
+    description:
+      'A woman raised in an isolated survivalist family reaches Cambridge through self-taught study.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-kite-runner',
+    title: 'The Kite Runner',
+    author: 'Khaled Hosseini',
+    isbn: '9781594631931',
+    genre: ['fiction', 'literary_fiction'],
+    subgenre: ['Historical Fiction', 'Redemption'],
+    page_count: 400,
+    word_count_estimate: 112000,
+    difficulty_band: 3,
+    cover_color: '#0284c7',
+    description:
+      'Friendship, betrayal, and atonement between Kabul and California across decades of Afghan history.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-brief-history-time',
+    title: 'A Brief History of Time',
+    author: 'Stephen Hawking',
+    isbn: '9780553380163',
+    genre: ['academic', 'general_nonfiction'],
+    subgenre: ['Cosmology', 'Popular Science'],
+    page_count: 212,
+    word_count_estimate: 60000,
+    difficulty_band: 4,
+    cover_color: '#312e81',
+    description:
+      'Black holes, the arrow of time, and the search for a unified theory explained for general readers.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-mockingbird',
+    title: 'To Kill a Mockingbird',
+    author: 'Harper Lee',
+    isbn: '9780060935467',
+    genre: ['literary_fiction', 'fiction'],
+    subgenre: ['Southern Gothic', 'Legal Drama'],
+    page_count: 336,
+    word_count_estimate: 99000,
+    difficulty_band: 2,
+    cover_color: '#4b5563',
+    description:
+      'Scout Finch witnesses racial injustice in 1930s Alabama while her father defends a Black man in court.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-618',
+    title: 'The 7 Habits of Highly Effective People',
+    author: 'Stephen R. Covey',
+    isbn: '9781982137274',
+    genre: ['general_nonfiction'],
+    subgenre: ['Personal Effectiveness', 'Leadership'],
+    page_count: 432,
+    word_count_estimate: 118000,
+    difficulty_band: 3,
+    cover_color: '#0f766e',
+    description:
+      'Principle-centered habits from proactivity and priorities through empathy and renewal.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-midnight-library',
+    title: 'The Midnight Library',
+    author: 'Matt Haig',
+    isbn: '9780525559474',
+    genre: ['light_fiction', 'fiction'],
+    subgenre: ['Speculative Fiction', 'Contemporary'],
+    page_count: 304,
+    word_count_estimate: 76000,
+    difficulty_band: 2,
+    cover_color: '#4338ca',
+    description:
+      'Between life and death, a library of possible lives lets Nora Seed reconsider regret and choice.',
+    source: 'OpenLibrary',
+  },
+  {
+    catalogId: 'cat-tiny-habits',
+    title: 'Tiny Habits',
+    author: 'BJ Fogg',
+    isbn: '9780358003328',
+    genre: ['general_nonfiction', 'academic'],
+    subgenre: ['Behavior Design', 'Psychology'],
+    page_count: 320,
+    word_count_estimate: 78000,
+    difficulty_band: 2,
+    cover_color: '#059669',
+    description:
+      'Behavior-design method: anchor micro-actions to existing routines and celebrate to wire them in.',
+    source: 'GoogleBooks',
+  },
+  {
+    catalogId: 'cat-count-monte-cristo',
+    title: 'The Count of Monte Cristo',
+    author: 'Alexandre Dumas',
+    isbn: '9780140449266',
+    genre: ['fiction', 'literary_fiction'],
+    subgenre: ['Adventure', 'Revenge'],
+    page_count: 1276,
+    word_count_estimate: 464000,
+    difficulty_band: 4,
+    cover_color: '#78350f',
+    description:
+      'Edmond Dantès escapes imprisonment and engineers an elaborate, patient revenge in post-Napoleonic France.',
+    source: 'OpenLibrary',
+  },
+];
+
+for (const book of POPULAR_BOOKS) {
+  if (CATALOG_BOOKS.some((existing) => existing.catalogId === book.catalogId)) continue;
+  CATALOG_BOOKS.push({ ...book, sample_passages: book.sample_passages ?? [] });
+}
+
+export interface RankedCatalogBook extends CatalogBookSeed {
+  matchScore: number;
+  matchKind: MatchKind;
+  matchedOn: 'title' | 'author' | 'subgenre' | 'genre' | 'isbn' | 'description';
+}
+
+/**
+ * Fuzzy, ranked catalog search. Never an exact-match filter: typos, partial
+ * titles, author fragments, sub-genres, genre names and ISBN fragments all
+ * resolve to a ranked list, and weak matches are surfaced as "similar".
+ */
+export function searchCatalogRanked(
+  query: string,
+  genreFilter?: BookGenre | 'all'
+): RankedCatalogBook[] {
+  const q = query.trim();
+  const cleanIsbn = q.replace(/[^0-9x]/gi, '');
+
+  const scored = CATALOG_BOOKS.map((item) => {
+    const genreOk = !genreFilter || genreFilter === 'all' || item.genre.includes(genreFilter);
+
+    if (!q) {
+      return genreOk
+        ? { ...item, matchScore: 0, matchKind: 'similar' as MatchKind, matchedOn: 'title' as const }
+        : null;
+    }
+
+    const candidates: Array<{
+      score: number;
+      matchedOn: RankedCatalogBook['matchedOn'];
+    }> = [
+      { score: scoreField(item.title, q) + 0.02, matchedOn: 'title' },
+      { score: scoreField(item.author, q) - 0.03, matchedOn: 'author' },
+      {
+        score: Math.max(0, ...item.subgenre.map((sub) => scoreField(sub, q) - 0.12)),
+        matchedOn: 'subgenre',
+      },
+      {
+        score: Math.max(
+          0,
+          ...item.genre.map((g) => scoreField(g.replace(/_/g, ' '), q) - 0.22)
+        ),
+        matchedOn: 'genre',
+      },
+      {
+        score:
+          cleanIsbn.length >= 4 && item.isbn.includes(cleanIsbn)
+            ? 1
+            : cleanIsbn.length >= 3 && item.isbn.startsWith(cleanIsbn)
+            ? 0.8
+            : 0,
+        matchedOn: 'isbn',
+      },
+      { score: scoreField(item.description, q) - 0.18, matchedOn: 'description' },
+    ];
+
+    const best = candidates.reduce((acc, c) => (c.score > acc.score ? c : acc), candidates[0]);
+    const score = Math.max(0, Math.min(1, best.score));
+
+    if (score < 0.45) return null;
+    if (!genreOk && score < 0.75) return null;
+
+    return {
+      ...item,
+      matchScore: Math.round(score * 100) / 100,
+      matchKind: classifyMatch(score),
+      matchedOn: best.matchedOn,
+    } satisfies RankedCatalogBook;
+  }).filter((entry): entry is RankedCatalogBook => entry !== null);
+
+  const ranked = scored.sort(
+    (a, b) => b.matchScore - a.matchScore || a.title.localeCompare(b.title)
+  );
+
+  // Once we have a strong hit, don't bury the reader in weak "similar" noise.
+  const bestScore = ranked[0]?.matchScore ?? 0;
+  if (bestScore < 0.75) return ranked;
+  const cutoff = Math.max(0.45, bestScore - 0.28);
+  return ranked.filter((entry) => entry.matchScore >= cutoff);
+}
+
 export function searchCatalog(query: string, genreFilter?: BookGenre | 'all'): CatalogBookSeed[] {
-  const q = query.trim().toLowerCase();
-  return CATALOG_BOOKS.filter((item) => {
-    const matchesGenre =
-      !genreFilter || genreFilter === 'all' || item.genre.includes(genreFilter);
-    if (!matchesGenre) return false;
-    if (!q) return true;
-    const cleanIsbn = q.replace(/[^0-9x]/gi, '');
-    return (
-      item.title.toLowerCase().includes(q) ||
-      item.author.toLowerCase().includes(q) ||
-      item.subgenre.some((s) => s.toLowerCase().includes(q)) ||
-      (cleanIsbn.length >= 4 && item.isbn.includes(cleanIsbn))
-    );
-  });
+  return searchCatalogRanked(query, genreFilter);
+}
+
+/** Curated fallback suggestions when a query has no reasonable match at all. */
+export function catalogSuggestions(limit = 4): CatalogBookSeed[] {
+  return CATALOG_BOOKS.slice(0, limit);
 }
