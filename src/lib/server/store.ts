@@ -1,6 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { LiveWatchSession, ReadingChallenge, UserProfile } from '../types';
+import {
+  ActivityFeedEvent,
+  LiveWatchSession,
+  ReadingChallenge,
+  ReadingDuel,
+  UserProfile,
+} from '../types';
 
 export interface StoredAccountRecord {
   user: UserProfile;
@@ -25,6 +31,9 @@ export interface ServerDataShape {
   usersData: Record<string, UserCloudBucket>;
   liveWatchRooms: Record<string, LiveWatchSession>;
   challenges: Record<string, ReadingChallenge>;
+  duels: Record<string, ReadingDuel>;
+  followsByUserId: Record<string, string[]>;
+  activityFeed: ActivityFeedEvent[];
 }
 
 const DATA_DIR = process.env.BOOKLIT_DATA_DIR || path.join(process.cwd(), '.data');
@@ -38,6 +47,9 @@ function createEmptyStore(): ServerDataShape {
     usersData: {},
     liveWatchRooms: {},
     challenges: {},
+    duels: {},
+    followsByUserId: {},
+    activityFeed: [],
   };
 }
 
@@ -55,6 +67,9 @@ export function readServerStore(): ServerDataShape {
       usersData: parsed.usersData ?? {},
       liveWatchRooms: parsed.liveWatchRooms ?? {},
       challenges: parsed.challenges ?? {},
+      duels: parsed.duels ?? {},
+      followsByUserId: parsed.followsByUserId ?? {},
+      activityFeed: Array.isArray(parsed.activityFeed) ? parsed.activityFeed : [],
     };
   } catch {
     return createEmptyStore();
@@ -72,6 +87,18 @@ export function writeServerStore(data: ServerDataShape): void {
   } catch {
     // Non-fatal fallback
   }
+}
+
+export function appendActivityEvent(
+  store: ServerDataShape,
+  params: Omit<ActivityFeedEvent, 'id' | 'createdAt'>
+): void {
+  const entry: ActivityFeedEvent = {
+    id: `act_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    createdAt: new Date().toISOString(),
+    ...params,
+  };
+  store.activityFeed = [entry, ...store.activityFeed].slice(0, 120);
 }
 
 const voiceRateBuckets = new Map<string, number[]>();

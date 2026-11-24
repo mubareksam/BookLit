@@ -194,6 +194,8 @@ export interface UserProfile {
   username: string;
   email: string;
   display_name: string;
+  bio?: string;
+  profile_visibility?: 'public' | 'private';
   auth_provider: 'email_password' | 'magic_link' | 'google' | 'apple';
   timezone: string;
   created_at: string;
@@ -386,6 +388,85 @@ export interface ReadingChallenge {
   participants: ChallengeParticipantEntry[];
 }
 
+export interface DuelContender {
+  userId: string;
+  username: string;
+  displayName: string;
+  verifiedMinutes: number;
+  verifiedPages: number;
+  verifiedSessionsCount: number;
+  avgTrustScore: number;
+  lastVerifiedAt: string | null;
+}
+
+export interface ReadingDuel {
+  id: string;
+  invite_code: string;
+  title: string;
+  metric: 'verified_minutes' | 'verified_pages';
+  target_value: number;
+  duration_hours: number;
+  status: 'open' | 'active' | 'completed' | 'declined';
+  challenger: DuelContender;
+  opponent: DuelContender | null;
+  invited_username: string | null;
+  winner_user_id: string | null;
+  created_at: string;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+export interface ActivityFeedEvent {
+  id: string;
+  actorUserId: string;
+  actorUsername: string;
+  actorDisplayName: string;
+  type:
+    | 'verified_session'
+    | 'challenge_created'
+    | 'challenge_joined'
+    | 'duel_created'
+    | 'duel_accepted'
+    | 'duel_won';
+  summary: string;
+  trustScore?: number;
+  createdAt: string;
+}
+
+export interface AchievementBadge {
+  id: string;
+  label: string;
+  description: string;
+  tier: 'bronze' | 'silver' | 'gold' | 'emerald';
+  unlocked: boolean;
+  progressLabel: string;
+}
+
+export interface PublicReaderProfile {
+  userId: string;
+  username: string;
+  displayName: string;
+  bio: string;
+  joinedAt: string;
+  rankTitle: string;
+  streakCount: number;
+  verifiedMinutesTotal: number;
+  verifiedPagesTotal: number;
+  verifiedSessionsCount: number;
+  avgTrustScore: number;
+  duelWins: number;
+  duelLosses: number;
+  followersCount: number;
+  followingCount: number;
+  isFollowing: boolean;
+  currentlyReading: {
+    title: string;
+    author: string;
+    progressPct: number;
+  } | null;
+  badges: AchievementBadge[];
+}
+
 export interface SessionDraft {
   id: string;
   user_id: string;
@@ -404,6 +485,7 @@ export interface SessionDraft {
   is_cure_attempt_for?: string | null;
   live_watch_room_id?: string | null;
   challenge_id?: string | null;
+  duel_id?: string | null;
   random_check_scheduled: boolean;
   random_check_completed: boolean;
   voice_check_result?: {

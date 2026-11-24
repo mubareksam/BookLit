@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { addDays } from 'date-fns';
 import { getAuthenticatedUser } from '@/lib/server/auth';
-import { readServerStore, writeServerStore } from '@/lib/server/store';
+import { appendActivityEvent, readServerStore, writeServerStore } from '@/lib/server/store';
 import { ReadingChallenge } from '@/lib/types';
+import { settleExpiredDuels } from '@/app/api/duels/route';
 
 export async function GET(req: NextRequest) {
   const user = getAuthenticatedUser(req);
@@ -18,7 +19,6 @@ export async function GET(req: NextRequest) {
       c.participants.some((p) => p.userId === user.id)
   );
 
-  // Sort participants on leaderboard by challenge metric descending
   const sorted = allChallenges
     .map((c) => ({
       ...c,
@@ -46,6 +46,7 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as {
       action: 'create' | 'join' | 'record_verified_session';
       challengeId?: string;
+      duelId?: string;
       inviteCode?: string;
       title?: string;
       description?: string;
@@ -54,15 +55,16 @@ export async function POST(req: NextRequest) {
       durationDays?: number;
       visibility?: 'public' | 'private';
       strictVerification?: boolean;
-      // For record_verified_session:
       verifiedMinutes?: number;
       verifiedPages?: number;
       trustScore?: number;
+      bookTitle?: string;
       liveCameraVerified?: boolean;
       challengeEligible?: boolean;
     };
 
     const store = readServerStore();
+    settleExpiredDuels(store);
 
     if (body.action === 'create') {
       const title = (body.title ?? '').trim();
@@ -107,6 +109,15 @@ export async function POST(req: NextRequest) {
       };
 
       store.challenges[challenge.id] = challenge;
+      if (challenge.visibility === 'public') {
+        appendActivityEvent(store, {
+          actorUserId: user.id,
+          actorUsername: user.username,
+          actorDisplayName: user.display_name,
+          type: 'challenge_created',
+          summary: `launched challenge "${challenge.title}"`,
+        });
+      }
       writeServerStore(store);
       return NextResponse.json({ challenge });
     }
@@ -136,6 +147,13 @@ export async function POST(req: NextRequest) {
           joinedAt: new Date().toISOString(),
           lastVerifiedAt: null,
         });
+        appendActivityEvent(store, {
+          actorUserId: user.id,
+          actorUsername: user.username,
+          actorDisplayName: user.display_name,
+          type: 'challenge_joined',
+          summary: `joined "${target.title}"`,
+        });
         writeServerStore(store);
       }
 
@@ -143,11 +161,12 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === 'record_verified_session') {
-      // Credit all active challenges this user has joined ONLY if session passed strict challenge anti-cheat
+      // Strict Anti-Cheat Gate: ONLY live-camera scanned + anti-cheat eligible sessions credit Challenges or Duels
       if (!body.challengeEligible || !body.liveCameraVerified) {
         return NextResponse.json({
           creditedChallenges: 0,
-          reason: 'Live start/end camera scan + anti-cheat seal required for challenge points.',
+          creditedDuels: 0,
+          reason: 'Live start/end camera scan + anti-cheat seal required for competitive points.',
         });
       }
 
@@ -155,8 +174,12 @@ export async function POST(req: NextRequest) {
       const pages = Math.max(0, Math.min(400, Number(body.verifiedPages) || 0));
       const trust = Math.max(50, Math.min(100, Number(body.trustScore) || 85));
       const nowMs = Date.now();
-      let credited = 0;
+      const nowIso = new Date().toISOString();
 
+      let creditedChallenges = 0;
+      let creditedDuels = 0;
+
+      // 1. Credit active Multi-User Challenges
       for (const ch of Object.values(store.challenges)) {
         if (new Date(ch.ends_at).getTime() < nowMs) continue;
         const entry = ch.participants.find((p) => p.userId === user.id);
@@ -170,12 +193,71 @@ export async function POST(req: NextRequest) {
         entry.avgTrustScore = Math.round(
           (entry.avgTrustScore * prevCount + trust) / (prevCount + 1)
         );
-        entry.lastVerifiedAt = new Date().toISOString();
-        credited++;
+        entry.lastVerifiedAt = nowIso;
+        creditedChallenges++;
       }
 
-      if (credited > 0) writeServerStore(store);
-      return NextResponse.json({ creditedChallenges: credited });
+      // 2. Credit active 1v1 Reading Duels & check instant target victory
+      for (const duel of Object.values(store.duels)) {
+        if (duel.status !== 'active') continue;
+        if (duel.ends_at && new Date(duel.ends_at).getTime() < nowMs) continue;
+        if (body.duelId && duel.id !== body.duelId) continue;
+
+        const contender =
+          duel.challenger.userId === user.id
+            ? duel.challenger
+            : duel.opponent?.userId === user.id
+            ? duel.opponent
+            : null;
+        if (!contender) continue;
+
+        const prevCount = contender.verifiedSessionsCount;
+        contender.verifiedMinutes = Math.round((contender.verifiedMinutes + mins) * 10) / 10;
+        contender.verifiedPages += pages;
+        contender.verifiedSessionsCount = prevCount + 1;
+        contender.avgTrustScore = Math.round(
+          (contender.avgTrustScore * prevCount + trust) / (prevCount + 1)
+        );
+        contender.lastVerifiedAt = nowIso;
+        creditedDuels++;
+
+        // First to reach target_value wins the 1v1 Duel immediately!
+        const newScore =
+          duel.metric === 'verified_pages' ? contender.verifiedPages : contender.verifiedMinutes;
+        if (newScore >= duel.target_value) {
+          duel.status = 'completed';
+          duel.winner_user_id = user.id;
+          const other =
+            duel.challenger.userId === user.id ? duel.opponent : duel.challenger;
+          appendActivityEvent(store, {
+            actorUserId: user.id,
+            actorUsername: user.username,
+            actorDisplayName: user.display_name,
+            type: 'duel_won',
+            summary: `hit ${duel.target_value}${
+              duel.metric === 'verified_pages' ? 'p' : 'm'
+            } first to win 1v1 duel "${duel.title}"${other ? ` vs @${other.username}` : ''}`,
+            trustScore: trust,
+          });
+        }
+      }
+
+      // Emit verified session activity event
+      if (mins >= 1 || pages >= 1) {
+        appendActivityEvent(store, {
+          actorUserId: user.id,
+          actorUsername: user.username,
+          actorDisplayName: user.display_name,
+          type: 'verified_session',
+          summary: `verified ${Math.round(mins)}m · ${pages}p${
+            body.bookTitle ? ` on ${body.bookTitle}` : ''
+          }`,
+          trustScore: trust,
+        });
+      }
+
+      writeServerStore(store);
+      return NextResponse.json({ creditedChallenges, creditedDuels });
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

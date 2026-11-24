@@ -32,6 +32,7 @@ import { SettingsAndPrivacyView } from '@/components/views/SettingsAndPrivacyVie
 import { SessionRunnerModal } from '@/components/SessionRunnerModal';
 import { AddBookModal } from '@/components/AddBookModal';
 import { BookDetailDrawer } from '@/components/BookDetailDrawer';
+import { ReaderProfileDrawer } from '@/components/ReaderProfileDrawer';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -340,6 +341,7 @@ export function BooklitShell() {
       <SessionRunnerModal />
       <AddBookModal />
       <BookDetailDrawer />
+      <ReaderProfileDrawer />
     </div>
   );
 }

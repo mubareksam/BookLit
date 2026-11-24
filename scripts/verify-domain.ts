@@ -8,6 +8,7 @@ import {
 } from '../src/lib/domain/verificationEngine';
 import { computeSignatureDistance } from '../src/lib/domain/ocrService';
 import { generateBookRecommendations } from '../src/lib/domain/recommendationEngine';
+import { computeAchievementBadges, computeReaderRank } from '../src/lib/domain/badges';
 import {
   hashPassword,
   signSessionToken,
@@ -259,7 +260,60 @@ function runDomainTests() {
   });
   assert(recs.length >= 4);
 
-  console.log('✓ All 9 Booklit v2 production & anti-cheat invariants verified.');
+  // 10. Social Rank, Achievement Badges & 1v1 Duel Victor calculation
+  assert.equal(computeReaderRank(25, 95), 'Initiate');
+  assert.equal(computeReaderRank(320, 92), 'Scholar');
+  assert.equal(computeReaderRank(2500, 94), 'Grandmaster');
+
+  const badgeResult = computeAchievementBadges({
+    userId: user.id,
+    streakCount: 8,
+    books: [litBook, techBook],
+    sessions: verifiedSessions,
+    challenges: [],
+    duels: [
+      {
+        id: 'duel-test-1',
+        invite_code: 'DL99AA',
+        title: '1v1 Showdown',
+        metric: 'verified_minutes',
+        target_value: 60,
+        duration_hours: 72,
+        status: 'completed',
+        challenger: {
+          userId: user.id,
+          username: user.username,
+          displayName: user.display_name,
+          verifiedMinutes: 65,
+          verifiedPages: 50,
+          verifiedSessionsCount: 3,
+          avgTrustScore: 95,
+          lastVerifiedAt: '2026-11-24T12:00:00Z',
+        },
+        opponent: {
+          userId: 'usr-test-2',
+          username: 'rival_reader',
+          displayName: 'Rival Reader',
+          verifiedMinutes: 40,
+          verifiedPages: 30,
+          verifiedSessionsCount: 2,
+          avgTrustScore: 91,
+          lastVerifiedAt: '2026-11-24T11:00:00Z',
+        },
+        invited_username: 'rival_reader',
+        winner_user_id: user.id,
+        created_at: '2026-11-23T10:00:00Z',
+        starts_at: '2026-11-23T10:05:00Z',
+        ends_at: '2026-11-26T10:05:00Z',
+      },
+    ],
+  });
+  assert.equal(badgeResult.duelWins, 1);
+  assert.equal(badgeResult.badges.find((b) => b.id === 'first_seal')?.unlocked, true);
+  assert.equal(badgeResult.badges.find((b) => b.id === 'seven_day_flame')?.unlocked, true);
+  assert.equal(badgeResult.badges.find((b) => b.id === 'duel_victor')?.unlocked, true);
+
+  console.log('✓ All 10 Booklit v3 social, 1v1 duel & anti-cheat invariants verified.');
 }
 
 runDomainTests();

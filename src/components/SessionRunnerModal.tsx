@@ -46,11 +46,13 @@ export function SessionRunnerModal() {
     sessionModalBookId,
     sessionModalCureTargetId,
     sessionModalChallengeId,
+    sessionModalDuelId,
     closeSessionFlow,
     setAddBookModalOpen,
     books,
     sessions,
     challenges,
+    duels,
     user,
     activeDraft,
     isOnline,
@@ -114,10 +116,25 @@ export function SessionRunnerModal() {
     [challenges, activeDraft?.challenge_id, sessionModalChallengeId, user?.id]
   );
 
+  const activeDuel = useMemo(
+    () =>
+      duels.find(
+        (d) =>
+          d.status === 'active' &&
+          (d.id === (activeDraft?.duel_id ?? sessionModalDuelId) ||
+            d.challenger.userId === user?.id ||
+            d.opponent?.userId === user?.id)
+      ) ?? null,
+    [duels, activeDraft?.duel_id, sessionModalDuelId, user?.id]
+  );
+
   const strictChallengeActive = Boolean(
     sessionModalChallengeId ||
+      sessionModalDuelId ||
       activeDraft?.challenge_id ||
+      activeDraft?.duel_id ||
       activeChallenge?.strict_verification ||
+      activeDuel ||
       user?.settings_json.challengeMode
   );
 
@@ -454,6 +471,7 @@ export function SessionRunnerModal() {
       startExtractedSnippet: startScanResult?.extractedSnippet,
       isCureAttemptFor: sessionModalCureTargetId,
       challengeId: sessionModalChallengeId ?? activeChallenge?.id ?? null,
+      duelId: sessionModalDuelId ?? activeDuel?.id ?? null,
       randomCheckScheduled: randomScheduled,
     });
     setLiveSeconds(0);
