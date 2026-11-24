@@ -1,309 +1,166 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Award, Check, Clock, Copy, Plus, Share2, Sparkles } from 'lucide-react';
+import { subDays } from 'date-fns';
+import { Check, Copy, Plus, Sparkles } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
-import { GENRE_META } from '@/lib/types';
-import { generateBookRecommendations, BookRecommendation } from '@/lib/domain/recommendationEngine';
-import { formatMinutesHuman } from '@/lib/domain/speedModel';
+import { generateBookRecommendations } from '@/lib/domain/recommendationEngine';
 
-export function RecommendationsAndRecapView({
-  initialSection = 'recommendations',
-}: {
-  initialSection?: 'recommendations' | 'year_in_books';
-}) {
+export function RecommendationsAndRecapView() {
   const { user, books, sessions, addBook, addTbrItem } = useBooklit();
-  const [section, setSection] = useState<'recommendations' | 'year_in_books'>(initialSection);
-  const [addedIds, setAddedIds] = useState<Record<string, string>>({});
-  const [copiedRecap, setCopiedRecap] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const recommendations = useMemo(() => {
+  const recs = useMemo(() => {
     if (!user) return [];
-    return generateBookRecommendations({
-      user,
-      userBooks: books,
-      sessions,
-    });
+    return generateBookRecommendations({ user, userBooks: books, sessions });
   }, [user, books, sessions]);
 
-  const recapStats = useMemo(() => {
-    const finished = books.filter((b) => b.status === 'finished');
-    const verified = sessions.filter((s) => s.verified && !s.strike_issued);
-    const totalMins = verified.reduce((acc, s) => acc + s.actual_minutes, 0);
-    const totalPages = verified.reduce(
-      (acc, s) => acc + Math.max(0, s.end_page - s.start_page),
-      0
-    );
-
-    const genreCounts = new Map<string, number>();
-    for (const b of books) {
-      for (const g of b.genre) {
-        genreCounts.set(g, (genreCounts.get(g) ?? 0) + 1);
-      }
-    }
-    const topGenreKey =
-      Array.from(genreCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ??
-      'literary_fiction';
-
-    return {
-      year: new Date().getFullYear(),
-      booksFinished: finished.length,
-      finishedTitles: finished.map((b) => b.title),
-      verifiedHours: Math.round((totalMins / 60) * 10) / 10,
-      verifiedPages: totalPages,
-      topGenreLabel:
-        GENRE_META[topGenreKey as keyof typeof GENRE_META]?.label ?? 'Literary Fiction',
-      streak: user?.streak_count ?? 0,
+  const recapCards = useMemo(() => {
+    const buildRecap = (days: number, label: string, id: string) => {
+      const cutoff = subDays(new Date(), days).getTime();
+      const recent = sessions.filter((s) => new Date(s.ended_at).getTime() >= cutoff);
+      const mins = Math.round(recent.reduce((acc, s) => acc + s.actual_minutes, 0));
+      const pages = recent.reduce((acc, s) => acc + Math.max(0, s.end_page - s.start_page), 0);
+      const verified = recent.filter((s) => s.verified).length;
+      const ratio = recent.length > 0 ? Math.round((verified / recent.length) * 100) : 100;
+      return { id, label, mins, pages, ratio, sessionsCount: recent.length };
     };
-  }, [books, sessions, user?.streak_count]);
+    return [buildRecap(7, 'Weekly Recap', 'weekly'), buildRecap(30, 'Monthly Recap', 'monthly')];
+  }, [sessions]);
 
   if (!user) return null;
 
-  const handleAcceptRec = async (rec: BookRecommendation, target: 'tbr' | 'reading') => {
-    const created = await addBook({
-      title: rec.seed.title,
-      author: rec.seed.author,
-      isbn: rec.seed.isbn,
-      genre: rec.seed.genre,
-      subgenre: rec.seed.subgenre,
-      page_count: rec.seed.page_count,
-      word_count_estimate: rec.seed.word_count_estimate,
-      difficulty_band: rec.seed.difficulty_band,
-      medium_default: 'physical',
-      description: rec.seed.description,
-      source: rec.seed.source,
-      status: target,
-      sample_passages: rec.seed.sample_passages,
-    });
-    if (target === 'tbr') {
-      await addTbrItem({
-        bookId: created.id,
-        notes: rec.rationale,
-      });
-    }
-    setAddedIds((prev) => ({
-      ...prev,
-      [rec.seed.catalogId]: target === 'tbr' ? 'Added to TBR' : 'Started Reading',
-    }));
-  };
-
-  const handleCopyRecap = async () => {
-    const summary = `Booklit ${recapStats.year} Year in Books — ${user.display_name}\n• ${recapStats.booksFinished} Books Finished\n• ${recapStats.verifiedHours} Verified Reading Hours (${recapStats.verifiedPages} pages)\n• Top Genre: ${recapStats.topGenreLabel}\n• ${recapStats.streak}-Day Verified Habit Streak`;
+  const copySummary = async (id: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(summary);
-      setCopiedRecap(true);
-      setTimeout(() => setCopiedRecap(false), 2500);
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
     } catch {}
   };
 
   return (
-    <div className="space-y-6 pb-20">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="font-serif text-2xl font-bold text-stone-900 dark:text-stone-100">
-            {section === 'recommendations'
-              ? 'Speed-Matched Recommendations'
-              : `${recapStats.year} Year in Books Recap`}
-          </h1>
-          <p className="text-xs text-stone-500 dark:text-stone-400">
-            {section === 'recommendations'
-              ? 'Hybrid content + genre-adjacency engine calibrated to your Bayesian reading speed and ratings.'
-              : 'Your verified reading milestones in a calm, shareable Literary card.'}
-          </p>
-        </div>
-
-        <div className="rounded-xl bg-stone-200/70 dark:bg-ink-800 p-1 flex gap-1">
-          <button
-            onClick={() => setSection('recommendations')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium ${
-              section === 'recommendations'
-                ? 'bg-white dark:bg-ink-700 text-stone-900 dark:text-white shadow-sm'
-                : 'text-stone-600 dark:text-stone-400'
-            }`}
-          >
-            Recommendations
-          </button>
-          <button
-            onClick={() => setSection('year_in_books')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium ${
-              section === 'year_in_books'
-                ? 'bg-white dark:bg-ink-700 text-stone-900 dark:text-white shadow-sm'
-                : 'text-stone-600 dark:text-stone-400'
-            }`}
-          >
-            Year in Books
-          </button>
-        </div>
+    <div className="space-y-6 pb-20 min-w-0">
+      <div>
+        <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Recs & Recaps</h1>
+        <p className="text-xs text-zinc-500">
+          Shareable reading cards and books matched to your verified pace.
+        </p>
       </div>
 
-      {section === 'recommendations' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {recommendations.map((rec) => {
-            const statusText = addedIds[rec.seed.catalogId];
-            return (
-              <div
-                key={rec.seed.catalogId}
-                className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white/90 dark:bg-ink-900 p-5 flex flex-col justify-between gap-4"
-              >
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex flex-wrap gap-1">
-                      {rec.seed.genre.map((g) => (
-                        <span
-                          key={g}
-                          className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${GENRE_META[g].badgeColor}`}
-                        >
-                          {GENRE_META[g].label}
-                        </span>
-                      ))}
-                    </div>
-                    <span className="text-xs font-mono font-semibold text-emerald-700 dark:text-emerald-300">
-                      {rec.score}% Match
+      {/* Shareable Recap Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        {recapCards.map((rc) => {
+          const shareText = `${user.display_name}’s ${rc.label} on Booklit — ${rc.mins} mins · ${rc.pages} pages (${rc.ratio}% verified).`;
+          return (
+            <div
+              key={rc.id}
+              className="rounded-2xl bg-gradient-to-br from-zinc-900 via-emerald-950 to-zinc-900 text-white p-5 space-y-3 border border-emerald-500/20"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold">
+                  {rc.label}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copySummary(rc.id, shareText)}
+                  className="inline-flex items-center gap-1 text-xs text-zinc-300 hover:text-white"
+                >
+                  {copiedId === rc.id ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                  Share Text
+                </button>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 pt-1 text-center">
+                <div className="rounded-xl bg-white/5 p-2.5">
+                  <div className="font-mono text-sm font-bold">{rc.mins}m</div>
+                  <div className="text-[10px] text-zinc-400">Minutes</div>
+                </div>
+                <div className="rounded-xl bg-white/5 p-2.5">
+                  <div className="font-mono text-sm font-bold">{rc.pages}</div>
+                  <div className="text-[10px] text-zinc-400">Pages</div>
+                </div>
+                <div className="rounded-xl bg-white/5 p-2.5">
+                  <div className="font-mono text-sm font-bold text-emerald-400">{rc.ratio}%</div>
+                  <div className="text-[10px] text-zinc-400">Verified</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Recommendations */}
+      <div className="space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+          Recommended Next Reads
+        </h2>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          {recs.slice(0, 6).map((rec) => (
+            <div
+              key={rec.seed.catalogId}
+              className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex flex-col justify-between gap-3 min-w-0"
+            >
+              <div className="flex gap-3 min-w-0">
+                <div
+                  className="w-11 h-14 rounded-xl shrink-0"
+                  style={{ backgroundColor: rec.seed.cover_color || '#065f46' }}
+                />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold truncate">{rec.seed.title}</h3>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
+                      {rec.score}%
                     </span>
                   </div>
-
-                  <div>
-                    <h3 className="font-serif text-lg font-bold text-stone-900 dark:text-stone-100">
-                      {rec.seed.title}
-                    </h3>
-                    <p className="text-xs text-stone-500">
-                      {rec.seed.author} · {rec.seed.page_count} pages · Difficulty{' '}
-                      {rec.seed.difficulty_band}/5
-                    </p>
-                  </div>
-
-                  {/* Required One-Sentence Rationale */}
-                  <div className="rounded-xl bg-emerald-950/5 dark:bg-emerald-950/30 border border-emerald-700/20 p-3 text-xs leading-relaxed text-stone-800 dark:text-stone-200">
-                    <Sparkles className="w-3.5 h-3.5 text-emerald-600 inline mr-1.5 -mt-0.5" />
+                  <p className="text-xs text-zinc-500 truncate">
+                    {rec.seed.author} · {rec.seed.page_count}p
+                  </p>
+                  <p className="text-[11px] text-zinc-600 dark:text-zinc-400 mt-1 line-clamp-2">
                     {rec.rationale}
-                  </div>
-
-                  <p className="text-xs text-stone-600 dark:text-stone-400 line-clamp-2">
-                    {rec.seed.description}
                   </p>
                 </div>
-
-                <div className="pt-3 border-t border-stone-200/70 dark:border-stone-800 flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-xs font-mono text-stone-600 dark:text-stone-300 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-emerald-600" />
-                    {formatMinutesHuman(rec.predictedMinutes)} (~{rec.sessionsToFinishEstimate}{' '}
-                    sittings at {rec.wpmUsed} wpm)
-                  </div>
-
-                  {statusText ? (
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-                      <Check className="w-3.5 h-3.5" /> {statusText}
-                    </span>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleAcceptRec(rec, 'tbr')}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium hover:bg-stone-100 dark:hover:bg-ink-800"
-                      >
-                        <Plus className="w-3 h-3" /> TBR
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleAcceptRec(rec, 'reading')}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
-                      >
-                        Read Now
-                      </button>
-                    </div>
-                  )}
-                </div>
               </div>
-            );
-          })}
+
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[11px] font-mono text-zinc-400">
+                  ~{rec.formattedFinish} read
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const created = await addBook({
+                      title: rec.seed.title,
+                      author: rec.seed.author,
+                      isbn: rec.seed.isbn || null,
+                      genre: rec.seed.genre,
+                      subgenre: rec.seed.subgenre,
+                      page_count: rec.seed.page_count,
+                      word_count_estimate: rec.seed.word_count_estimate,
+                      difficulty_band: rec.seed.difficulty_band,
+                      medium_default: 'physical',
+                      description: rec.seed.description,
+                      source: rec.seed.source,
+                      status: 'tbr',
+                      sample_passages: rec.seed.sample_passages,
+                    });
+                    await addTbrItem({ bookId: created.id });
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add to TBR
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
-      ) : (
-        /* YEAR IN BOOKS SHAREABLE RECAP POSTER */
-        <div className="max-w-xl mx-auto space-y-4">
-          <div className="rounded-3xl bg-gradient-to-br from-[#0F1714] via-[#13221B] to-[#090A0D] text-paper-50 p-7 sm:p-9 border border-emerald-500/25 shadow-2xl space-y-6">
-            <div className="flex items-center justify-between">
-              <span className="text-xs uppercase tracking-[0.2em] text-emerald-400 font-semibold">
-                Booklit · {recapStats.year} Year in Books
-              </span>
-              <Award className="w-5 h-5 text-emerald-400" />
-            </div>
-
-            <div className="space-y-1">
-              <h2 className="font-serif text-3xl font-bold leading-tight">
-                {user.display_name}’s Verified Reading Ledger
-              </h2>
-              <p className="text-xs text-stone-400">
-                Every hour earned offline-first at a human pace.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 py-2">
-              <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
-                <div className="text-[11px] uppercase tracking-wider text-stone-400">
-                  Books Finished
-                </div>
-                <div className="font-mono text-3xl font-bold mt-1">
-                  {recapStats.booksFinished}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
-                <div className="text-[11px] uppercase tracking-wider text-stone-400">
-                  Verified Hours
-                </div>
-                <div className="font-mono text-3xl font-bold mt-1 text-emerald-400">
-                  {recapStats.verifiedHours}h
-                </div>
-              </div>
-              <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
-                <div className="text-[11px] uppercase tracking-wider text-stone-400">
-                  Signature Genre
-                </div>
-                <div className="font-serif text-base font-semibold mt-1.5">
-                  {recapStats.topGenreLabel}
-                </div>
-              </div>
-              <div className="rounded-2xl bg-white/5 border border-white/10 p-4">
-                <div className="text-[11px] uppercase tracking-wider text-stone-400">
-                  Habit Streak
-                </div>
-                <div className="font-mono text-2xl font-bold mt-1">{recapStats.streak} days</div>
-              </div>
-            </div>
-
-            {recapStats.finishedTitles.length > 0 && (
-              <div className="space-y-1.5 pt-2 border-t border-white/10">
-                <div className="text-[11px] uppercase tracking-wider text-stone-400">
-                  Completed Shelf Highlights
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {recapStats.finishedTitles.map((t, i) => (
-                    <span
-                      key={i}
-                      className="px-2.5 py-1 rounded-full bg-white/10 text-xs font-serif"
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={handleCopyRecap}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
-            >
-              {copiedRecap ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              {copiedRecap ? 'Copied Shareable Summary!' : 'Share / Copy Recap Text'}
-            </button>
-            <span className="text-xs text-stone-500 inline-flex items-center gap-1">
-              <Share2 className="w-3.5 h-3.5" /> Ready for book clubs
-            </span>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

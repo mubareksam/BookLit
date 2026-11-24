@@ -1,85 +1,63 @@
 import fs from 'fs';
 import path from 'path';
-import { LiveWatchSession } from '../types';
+import { LiveWatchSession, ReadingChallenge, UserProfile } from '../types';
 
-interface ServerDataShape {
-  usersData: Record<
-    string,
-    {
-      profile?: unknown;
-      books: Record<string, unknown>;
-      sessions: Record<string, unknown>;
-      verificationEvents: Record<string, unknown>;
-      tbr: Record<string, unknown>;
-      dailyAggregates: Record<string, unknown>;
-      updatedAt: string;
-    }
-  >;
+export interface StoredAccountRecord {
+  user: UserProfile;
+  passwordSalt: string;
+  passwordHash: string;
+}
+
+export interface UserCloudBucket {
+  profile: UserProfile;
+  books: Record<string, unknown>;
+  sessions: Record<string, unknown>;
+  verificationEvents: Record<string, unknown>;
+  tbr: Record<string, unknown>;
+  dailyAggregates: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface ServerDataShape {
+  accountsById: Record<string, StoredAccountRecord>;
+  accountIdByEmail: Record<string, string>;
+  accountIdByUsername: Record<string, string>;
+  usersData: Record<string, UserCloudBucket>;
   liveWatchRooms: Record<string, LiveWatchSession>;
+  challenges: Record<string, ReadingChallenge>;
 }
 
 const DATA_DIR = process.env.BOOKLIT_DATA_DIR || path.join(process.cwd(), '.data');
-const DATA_FILE = path.join(DATA_DIR, 'booklit-server.json');
+const DATA_FILE = path.join(DATA_DIR, 'booklit-prod-v2.json');
 
-function ensureDefaultStore(): ServerDataShape {
+function createEmptyStore(): ServerDataShape {
   return {
+    accountsById: {},
+    accountIdByEmail: {},
+    accountIdByUsername: {},
     usersData: {},
-    liveWatchRooms: {
-      'LAMP-402': {
-        id: 'lw-room-evening',
-        room_code: 'LAMP-402',
-        title: 'Evening Quiet Reading Hour',
-        host_user_id: 'reader-hana-001',
-        guest_user_ids: ['guest-dawit', 'guest-mira'],
-        started_at: new Date(Date.now() - 18 * 60000).toISOString(),
-        ended_at: null,
-        target_minutes: 45,
-        status: 'active',
-        host_verified_minutes: 25.4,
-        guest_verified_minutes: {
-          'guest-dawit': 21.0,
-          'guest-mira': 16.5,
-        },
-        participants: [
-          {
-            userId: 'reader-hana-001',
-            displayName: 'Hana Tekle',
-            role: 'host',
-            verifiedMinutesInRoom: 25.4,
-            status: 'reading_calmly',
-            joinedAt: new Date(Date.now() - 18 * 60000).toISOString(),
-          },
-          {
-            userId: 'guest-dawit',
-            displayName: 'Dawit A.',
-            role: 'guest',
-            verifiedMinutesInRoom: 21.0,
-            status: 'reading_calmly',
-            joinedAt: new Date(Date.now() - 16 * 60000).toISOString(),
-          },
-          {
-            userId: 'guest-mira',
-            displayName: 'Mira K.',
-            role: 'guest',
-            verifiedMinutesInRoom: 16.5,
-            status: 'reading_calmly',
-            joinedAt: new Date(Date.now() - 14 * 60000).toISOString(),
-          },
-        ],
-      },
-    },
+    liveWatchRooms: {},
+    challenges: {},
   };
 }
 
 export function readServerStore(): ServerDataShape {
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      return ensureDefaultStore();
+      return createEmptyStore();
     }
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    return JSON.parse(raw) as ServerDataShape;
+    const parsed = JSON.parse(raw) as Partial<ServerDataShape>;
+    return {
+      accountsById: parsed.accountsById ?? {},
+      accountIdByEmail: parsed.accountIdByEmail ?? {},
+      accountIdByUsername: parsed.accountIdByUsername ?? {},
+      usersData: parsed.usersData ?? {},
+      liveWatchRooms: parsed.liveWatchRooms ?? {},
+      challenges: parsed.challenges ?? {},
+    };
   } catch {
-    return ensureDefaultStore();
+    return createEmptyStore();
   }
 }
 
@@ -92,11 +70,10 @@ export function writeServerStore(data: ServerDataShape): void {
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
     fs.renameSync(tmp, DATA_FILE);
   } catch {
-    // Non-fatal in read-only environments
+    // Non-fatal fallback
   }
 }
 
-// Sliding-window rate limiter for voice verification endpoint (max 12 checks / 5 minutes per client/user)
 const voiceRateBuckets = new Map<string, number[]>();
 
 export function checkVoiceRateLimit(key: string): { allowed: boolean; retryAfterSeconds: number } {

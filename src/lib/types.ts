@@ -31,7 +31,7 @@ export const GENRE_META: Record<
   }
 > = {
   light_fiction: {
-    label: 'Genre / Light Fiction',
+    label: 'Genre Fiction',
     priorWpm: 290,
     priorSd: 45,
     ceilingWpm: 460,
@@ -61,7 +61,7 @@ export const GENRE_META: Record<
     badgeColor: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
   },
   general_nonfiction: {
-    label: 'General Nonfiction',
+    label: 'Nonfiction',
     priorWpm: 240,
     priorSd: 38,
     ceilingWpm: 390,
@@ -81,7 +81,7 @@ export const GENRE_META: Record<
     badgeColor: 'bg-amber-500/10 text-amber-800 dark:text-amber-300',
   },
   philosophy: {
-    label: 'Philosophy & Essays',
+    label: 'Philosophy',
     priorWpm: 175,
     priorSd: 32,
     ceilingWpm: 295,
@@ -101,7 +101,7 @@ export const GENRE_META: Record<
     badgeColor: 'bg-yellow-500/10 text-yellow-800 dark:text-yellow-300',
   },
   reference: {
-    label: 'Reference & Handbooks',
+    label: 'Reference',
     priorWpm: 185,
     priorSd: 38,
     ceilingWpm: 330,
@@ -131,7 +131,7 @@ export const GENRE_META: Record<
     badgeColor: 'bg-cyan-500/10 text-cyan-800 dark:text-cyan-300',
   },
   poetry: {
-    label: 'Poetry & Verse',
+    label: 'Poetry',
     priorWpm: 130,
     priorSd: 30,
     ceilingWpm: 235,
@@ -141,7 +141,7 @@ export const GENRE_META: Record<
     badgeColor: 'bg-pink-500/10 text-pink-700 dark:text-pink-300',
   },
   childrens: {
-    label: "Children's & Middle Grade",
+    label: "Children's",
     priorWpm: 275,
     priorSd: 48,
     ceilingWpm: 440,
@@ -166,9 +166,9 @@ export type VerificationResult = 'pass' | 'fail' | 'inconclusive';
 export interface ReminderWindow {
   id: string;
   label: string;
-  startTime: string; // HH:mm
+  startTime: string;
   durationMinutes: number;
-  days: number[]; // 0 = Sun ... 6 = Sat
+  days: number[];
   enabled: boolean;
   channel: 'local_push' | 'email_fallback';
 }
@@ -186,17 +186,17 @@ export interface UserSettings {
   streakInsuranceAvailable: boolean;
   streakInsuranceLastUsedMonth: string | null;
   themePreference: 'system' | 'light' | 'dark';
-  interactionProfileOverride: 'auto' | 'desktop' | 'pwa';
   reminderWindows: ReminderWindow[];
 }
 
 export interface UserProfile {
   id: string;
+  username: string;
   email: string;
   display_name: string;
-  auth_provider: 'magic_link' | 'google' | 'apple' | 'guest_local';
+  auth_provider: 'email_password' | 'magic_link' | 'google' | 'apple';
   timezone: string;
-  created_at: string; // ISO UTC
+  created_at: string;
   reading_goal_type: ReadingGoalType;
   reading_goal_target: number;
   preferred_genres: BookGenre[];
@@ -251,7 +251,9 @@ export interface SessionFlag {
     | 'voice_inconclusive'
     | 'voice_failed'
     | 'comprehension_missed'
-    | 'ocr_low_confidence';
+    | 'ocr_low_confidence'
+    | 'duplicate_scan_frame'
+    | 'silent_audio_rejected';
   severity: 'info' | 'soft' | 'escalated';
   label: string;
   explanation: string;
@@ -263,15 +265,18 @@ export interface ReadingSession {
   user_id: string;
   book_id: string;
   medium: ReadingMedium;
-  started_at: string; // UTC ISO
-  ended_at: string; // UTC ISO
+  started_at: string;
+  ended_at: string;
   start_page: number;
   end_page: number;
   start_char_offset?: number | null;
   end_char_offset?: number | null;
   verified: boolean;
+  live_camera_verified?: boolean;
+  challenge_eligible?: boolean;
+  challenge_id?: string | null;
   verification_tier: VerificationTier;
-  trust_score: number; // 0-100
+  trust_score: number;
   predicted_minutes: number;
   actual_minutes: number;
   wpm_observed: number;
@@ -292,7 +297,7 @@ export interface VerificationEvent {
   session_id: string;
   type: VerificationEventType;
   result: VerificationResult;
-  confidence: number; // 0.0 - 1.0
+  confidence: number;
   metadata_json: Record<string, unknown>;
   created_at: string;
 }
@@ -305,7 +310,7 @@ export interface TBRItem {
   free_text_author?: string;
   free_text_genre?: BookGenre;
   priority: number;
-  planned_start_date: string | null; // YYYY-MM-DD
+  planned_start_date: string | null;
   reminder_enabled: boolean;
   completed_at: string | null;
   notes: string;
@@ -313,9 +318,9 @@ export interface TBRItem {
 }
 
 export interface DailyAggregate {
-  id: string; // `${user_id}_${date}`
+  id: string;
   user_id: string;
-  date: string; // YYYY-MM-DD
+  date: string;
   verified_minutes: number;
   unverified_minutes: number;
   app_foreground_minutes: number;
@@ -329,6 +334,7 @@ export interface DailyAggregate {
 
 export interface LiveWatchParticipantSummary {
   userId: string;
+  username: string;
   displayName: string;
   role: 'host' | 'guest';
   verifiedMinutesInRoom: number;
@@ -351,6 +357,35 @@ export interface LiveWatchSession {
   participants: LiveWatchParticipantSummary[];
 }
 
+export interface ChallengeParticipantEntry {
+  userId: string;
+  username: string;
+  displayName: string;
+  verifiedMinutes: number;
+  verifiedPages: number;
+  verifiedSessionsCount: number;
+  avgTrustScore: number;
+  joinedAt: string;
+  lastVerifiedAt: string | null;
+}
+
+export interface ReadingChallenge {
+  id: string;
+  invite_code: string;
+  title: string;
+  description: string;
+  creator_user_id: string;
+  creator_name: string;
+  metric: 'verified_minutes' | 'verified_pages';
+  target_value: number;
+  visibility: 'public' | 'private';
+  strict_verification: boolean; // Requires Live Camera Start+End Scan + Voice Check + Distinct Page Frame
+  starts_at: string;
+  ends_at: string;
+  created_at: string;
+  participants: ChallengeParticipantEntry[];
+}
+
 export interface SessionDraft {
   id: string;
   user_id: string;
@@ -361,10 +396,14 @@ export interface SessionDraft {
   start_page: number;
   start_words_on_page?: number;
   start_scan_confidence?: number;
+  start_frame_signature?: string | null;
+  start_scanned_live?: boolean;
+  start_extracted_snippet?: string;
   background_seconds: number;
   focus_transitions: number;
   is_cure_attempt_for?: string | null;
   live_watch_room_id?: string | null;
+  challenge_id?: string | null;
   random_check_scheduled: boolean;
   random_check_completed: boolean;
   voice_check_result?: {
@@ -373,6 +412,7 @@ export interface SessionDraft {
     matchedRatio: number;
     wps: number;
     whisperMode: boolean;
+    rmsVoiceDetected: boolean;
     explanation: string;
   } | null;
   comprehension_result?: {
