@@ -1,20 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192" fill="none">
   <defs>
-    <linearGradient id="bg" x1="18" y1="12" x2="174" y2="180" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0D261D"/>
-      <stop offset="100%" stop-color="#091210"/>
-    </linearGradient>
-    <linearGradient id="fl" x1="96" y1="33" x2="96" y2="114" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#6EE7B7"/>
-      <stop offset="55%" stop-color="#10B981"/>
+    <linearGradient id="bg" x1="12" y1="12" x2="180" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="42%" stop-color="#10B981"/>
       <stop offset="100%" stop-color="#047857"/>
     </linearGradient>
+    <linearGradient id="fl" x1="96" y1="30" x2="96" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FEF3C7"/>
+      <stop offset="55%" stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#F59E0B"/>
+    </linearGradient>
   </defs>
-  <rect width="192" height="192" rx="46" fill="url(#bg)"/>
-  <rect x="8" y="8" width="176" height="176" rx="40" stroke="#34D399" stroke-opacity="0.3" stroke-width="3"/>
-  <path d="M42 76.5C42 71.4 46.2 67.5 51.3 68.4C67.2 70.8 81.6 77.4 93 87.6V142.5C81.6 132.9 66.9 126.9 50.4 125.1C45.6 124.5 42 120.6 42 115.8V76.5Z" fill="#F8FAFC"/>
-  <path d="M150 76.5C150 71.4 145.8 67.5 140.7 68.4C124.8 70.8 110.4 77.4 99 87.6V142.5C110.4 132.9 125.1 126.9 141.6 125.1C146.4 124.5 150 120.6 150 115.8V76.5Z" fill="#CBD5E1"/>
+  <rect width="192" height="192" rx="48" fill="url(#bg)"/>
+  <rect x="9" y="9" width="174" height="174" rx="40" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="4"/>
+  <path d="M42 76.5C42 71.4 46.2 67.5 51.3 68.4C67.2 70.8 81.6 77.4 93 87.6V142.5C81.6 132.9 66.9 126.9 50.4 125.1C45.6 124.5 42 120.6 42 115.8V76.5Z" fill="#FFFFFF"/>
+  <path d="M150 76.5C150 71.4 145.8 67.5 140.7 68.4C124.8 70.8 110.4 77.4 99 87.6V142.5C110.4 132.9 125.1 126.9 141.6 125.1C146.4 124.5 150 120.6 150 115.8V76.5Z" fill="#D1FAE5"/>
   <path d="M96 33C96 33 73.5 55.2 73.5 74.4C73.5 87.3 83.4 97.5 96 100.2C108.6 97.5 118.5 87.3 118.5 74.4C118.5 55.2 96 33 96 33Z" fill="url(#fl)"/>
-  <path d="M96 52.5C96 52.5 86.4 63.9 86.4 73.2C86.4 79.2 90.6 84 96 85.5C101.4 84 105.6 79.2 105.6 73.2C105.6 63.9 96 52.5 96 52.5Z" fill="#ECFDF5"/>
-  <path d="M51 142.5C66.6 142.5 82.2 147 96 154.5C109.8 147 125.4 142.5 141 142.5" stroke="#34D399" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M96 52.5C96 52.5 86.4 63.9 86.4 73.2C86.4 79.2 90.6 84 96 85.5C101.4 84 105.6 79.2 105.6 73.2C105.6 63.9 96 52.5 96 52.5Z" fill="#FFFBEB"/>
+  <path d="M51 142.5C66.6 142.5 82.2 147 96 154.5C109.8 147 125.4 142.5 141 142.5" stroke="#ECFDF5" stroke-width="6.5" stroke-linecap="round"/>
 </svg>

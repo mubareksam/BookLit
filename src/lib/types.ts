@@ -194,6 +194,8 @@ export interface UserProfile {
   username: string;
   email: string;
   display_name: string;
+  bio?: string;
+  profile_visibility?: 'public' | 'private';
   auth_provider: 'email_password' | 'magic_link' | 'google' | 'apple';
   timezone: string;
   created_at: string;
@@ -253,7 +255,9 @@ export interface SessionFlag {
     | 'comprehension_missed'
     | 'ocr_low_confidence'
     | 'duplicate_scan_frame'
-    | 'silent_audio_rejected';
+    | 'silent_audio_rejected'
+    | 'ereader_no_progress'
+    | 'ereader_attention_missed';
   severity: 'info' | 'soft' | 'escalated';
   label: string;
   explanation: string;
@@ -276,7 +280,10 @@ export interface ReadingSession {
   challenge_eligible?: boolean;
   challenge_id?: string | null;
   verification_tier: VerificationTier;
+  /** Honest Rate on the 0–1000 scale (1000 = fully consistent verified history). */
   trust_score: number;
+  /** Explicit scale marker so legacy 0–100 history can be lifted automatically. */
+  trust_scale?: number;
   predicted_minutes: number;
   actual_minutes: number;
   wpm_observed: number;
@@ -386,6 +393,91 @@ export interface ReadingChallenge {
   participants: ChallengeParticipantEntry[];
 }
 
+export interface DuelContender {
+  userId: string;
+  username: string;
+  displayName: string;
+  verifiedMinutes: number;
+  verifiedPages: number;
+  verifiedSessionsCount: number;
+  avgTrustScore: number;
+  lastVerifiedAt: string | null;
+}
+
+export interface ReadingDuel {
+  id: string;
+  invite_code: string;
+  title: string;
+  metric: 'verified_minutes' | 'verified_pages';
+  target_value: number;
+  duration_hours: number;
+  status: 'open' | 'active' | 'completed' | 'declined';
+  challenger: DuelContender;
+  opponent: DuelContender | null;
+  invited_username: string | null;
+  winner_user_id: string | null;
+  created_at: string;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+export interface ActivityFeedEvent {
+  id: string;
+  actorUserId: string;
+  actorUsername: string;
+  actorDisplayName: string;
+  type:
+    | 'verified_session'
+    | 'challenge_created'
+    | 'challenge_joined'
+    | 'duel_created'
+    | 'duel_accepted'
+    | 'duel_won';
+  summary: string;
+  trustScore?: number;
+  /** Spark counts (Booklit's "like" for verified activity). */
+  sparkCount?: number;
+  sparkedByMe?: boolean;
+  createdAt: string;
+}
+
+export interface AchievementBadge {
+  id: string;
+  label: string;
+  description: string;
+  tier: 'bronze' | 'silver' | 'gold' | 'emerald';
+  unlocked: boolean;
+  progressLabel: string;
+}
+
+export interface PublicReaderProfile {
+  userId: string;
+  username: string;
+  displayName: string;
+  bio: string;
+  joinedAt: string;
+  rankTitle: string;
+  streakCount: number;
+  verifiedMinutesTotal: number;
+  verifiedPagesTotal: number;
+  verifiedSessionsCount: number;
+  avgTrustScore: number;
+  duelWins: number;
+  duelLosses: number;
+  followersCount: number;
+  followingCount: number;
+  isFollowing: boolean;
+  /** A "Tether" is mutual: both readers follow each other. */
+  isTethered?: boolean;
+  sparkCount?: number;
+  currentlyReading: {
+    title: string;
+    author: string;
+    progressPct: number;
+  } | null;
+  badges: AchievementBadge[];
+}
+
 export interface SessionDraft {
   id: string;
   user_id: string;
@@ -404,6 +496,11 @@ export interface SessionDraft {
   is_cure_attempt_for?: string | null;
   live_watch_room_id?: string | null;
   challenge_id?: string | null;
+  duel_id?: string | null;
+  ereader_start_percent?: number | null;
+  ereader_checkpoint_verified?: boolean;
+  ereader_attention_checks?: number;
+  ereader_attention_checks_passed?: number;
   random_check_scheduled: boolean;
   random_check_completed: boolean;
   voice_check_result?: {

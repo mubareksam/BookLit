@@ -12,11 +12,14 @@ import React, {
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format, subDays } from 'date-fns';
 import {
+  ActivityFeedEvent,
   Book,
   BookGenre,
   DailyAggregate,
   GENRE_META,
+  PublicReaderProfile,
   ReadingChallenge,
+  ReadingDuel,
   ReadingGoalType,
   ReadingMedium,
   ReadingSession,
@@ -38,6 +41,12 @@ import {
 } from '@/lib/db/dexie';
 import { estimateUserGenreSpeed } from '@/lib/domain/speedModel';
 import { findCurableStrikeSession, scoreReadingSession } from '@/lib/domain/verificationEngine';
+import {
+  applyThemePreference,
+  readStoredTheme,
+  storeThemePreference,
+  THEME_EVENT,
+} from '@/lib/theme';
 
 export type ActiveNavView =
   | 'dashboard'
@@ -62,6 +71,9 @@ interface CompleteSessionPayload {
   endScannedLive?: boolean;
   hasTier1ScanOrImport: boolean;
   strictChallengeMode?: boolean;
+  ereaderEndPercent?: number;
+  ereaderAttentionChecks?: number;
+  ereaderAttentionChecksPassed?: number;
   notes?: string;
 }
 
@@ -74,6 +86,10 @@ interface BooklitContextValue {
   tbrItems: TBRItem[];
   dailyAggregates: DailyAggregate[];
   challenges: ReadingChallenge[];
+  duels: ReadingDuel[];
+  activityFeed: ActivityFeedEvent[];
+  readers: PublicReaderProfile[];
+  mySocialProfile: PublicReaderProfile | null;
   activeDraft: SessionDraft | null;
   pendingSyncCount: number;
   isOnline: boolean;
@@ -91,10 +107,12 @@ interface BooklitContextValue {
   sessionModalBookId: string | null;
   sessionModalCureTargetId: string | null;
   sessionModalChallengeId: string | null;
+  sessionModalDuelId: string | null;
   openSessionFlow: (
     bookId?: string,
     cureTargetSessionId?: string | null,
-    challengeId?: string | null
+    challengeId?: string | null,
+    duelId?: string | null
   ) => void;
   closeSessionFlow: () => void;
   showFirstSessionNotificationBanner: boolean;
@@ -102,6 +120,8 @@ interface BooklitContextValue {
 
   selectedBookId: string | null;
   setSelectedBookId: (id: string | null) => void;
+  selectedReaderUsername: string | null;
+  setSelectedReaderUsername: (username: string | null) => void;
   addBookModalOpen: boolean;
   setAddBookModalOpen: (open: boolean) => void;
 
@@ -157,14 +177,18 @@ interface BooklitContextValue {
     isCureAttemptFor?: string | null;
     liveWatchRoomId?: string | null;
     challengeId?: string | null;
+    duelId?: string | null;
+    ereaderStartPercent?: number | null;
+    ereaderCheckpointVerified?: boolean;
     randomCheckScheduled: boolean;
   }) => Promise<SessionDraft>;
   updateSessionDraft: (draftId: string, patch: Partial<SessionDraft>) => Promise<void>;
   discardSessionDraft: (draftId: string) => Promise<void>;
   completeReadingSession: (payload: CompleteSessionPayload) => Promise<ReadingSession>;
 
-  // Challenges
+  // Challenges, 1v1 Duels & Social
   refreshChallenges: () => Promise<void>;
+  refreshSocialAndDuels: (searchQuery?: string) => Promise<void>;
   createChallenge: (params: {
     title: string;
     description: string;
@@ -178,6 +202,22 @@ interface BooklitContextValue {
     challengeId?: string;
     inviteCode?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
+  createDuel: (params: {
+    title?: string;
+    metric: 'verified_minutes' | 'verified_pages';
+    targetValue: number;
+    durationHours: number;
+    invitedUsername?: string | null;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  acceptDuel: (params: {
+    duelId?: string;
+    inviteCode?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  declineDuel: (duelId: string) => Promise<void>;
+  /** Tether a reader (follow). Mutual tethers unlock closer comparison. */
+  toggleFollowReader: (targetUserId: string) => Promise<void>;
+  /** Spark (like) a verified arena activity event. */
+  toggleSparkEvent: (eventId: string) => Promise<void>;
 
   // TBR
   addTbrItem: (params: {
@@ -213,15 +253,21 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
   const [isStandalonePwa, setIsStandalonePwa] = useState(false);
 
   const [challenges, setChallenges] = useState<ReadingChallenge[]>([]);
+  const [duels, setDuels] = useState<ReadingDuel[]>([]);
+  const [activityFeed, setActivityFeed] = useState<ActivityFeedEvent[]>([]);
+  const [readers, setReaders] = useState<PublicReaderProfile[]>([]);
+  const [mySocialProfile, setMySocialProfile] = useState<PublicReaderProfile | null>(null);
 
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [sessionModalBookId, setSessionModalBookId] = useState<string | null>(null);
   const [sessionModalCureTargetId, setSessionModalCureTargetId] = useState<string | null>(null);
   const [sessionModalChallengeId, setSessionModalChallengeId] = useState<string | null>(null);
+  const [sessionModalDuelId, setSessionModalDuelId] = useState<string | null>(null);
   const [showFirstSessionNotificationBanner, setShowFirstSessionNotificationBanner] =
     useState(false);
 
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [selectedReaderUsername, setSelectedReaderUsername] = useState<string | null>(null);
   const [addBookModalOpen, setAddBookModalOpen] = useState(false);
 
   // Check active session cookie on load (or offline cached profile if offline)
@@ -401,28 +447,62 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     }
   }, [activeUserId, isOnline]);
 
+  const refreshSocialAndDuels = useCallback(
+    async (searchQuery?: string) => {
+      if (!activeUserId || !isOnline) return;
+      try {
+        const qUrl = searchQuery?.trim()
+          ? `/api/social?q=${encodeURIComponent(searchQuery.trim())}`
+          : '/api/social';
+        const [duelsRes, socialRes] = await Promise.all([
+          fetch('/api/duels'),
+          fetch(qUrl),
+        ]);
+        if (duelsRes.ok) {
+          const dData = await duelsRes.json();
+          if (Array.isArray(dData.duels)) setDuels(dData.duels);
+        }
+        if (socialRes.ok) {
+          const sData = await socialRes.json();
+          if (sData.myProfile) setMySocialProfile(sData.myProfile);
+          if (Array.isArray(sData.readers)) setReaders(sData.readers);
+          if (Array.isArray(sData.activityFeed)) setActivityFeed(sData.activityFeed);
+        }
+      } catch {
+        // Offline safe
+      }
+    },
+    [activeUserId, isOnline]
+  );
+
   useEffect(() => {
     if (activeUserId && isOnline) {
       refreshChallenges();
+      refreshSocialAndDuels();
     } else if (!activeUserId) {
       setChallenges([]);
+      setDuels([]);
+      setActivityFeed([]);
+      setReaders([]);
+      setMySocialProfile(null);
     }
-  }, [activeUserId, isOnline, refreshChallenges]);
+  }, [activeUserId, isOnline, refreshChallenges, refreshSocialAndDuels]);
 
-  // Theme preference
+  // Theme preference: profile first, then this device's saved choice, then system.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const pref = user?.settings_json.themePreference ?? 'system';
-    const root = document.documentElement;
+    const pref = user?.settings_json.themePreference ?? readStoredTheme();
     const mediaDark = window.matchMedia('(prefers-color-scheme: dark)');
 
-    const applyTheme = () => {
-      const shouldDark = pref === 'dark' || (pref === 'system' && mediaDark.matches);
-      root.classList.toggle('dark', shouldDark);
+    const apply = () => applyThemePreference(pref);
+    apply();
+    if (pref !== 'system') storeThemePreference(pref);
+    mediaDark.addEventListener('change', apply);
+    window.addEventListener(THEME_EVENT, apply);
+    return () => {
+      mediaDark.removeEventListener('change', apply);
+      window.removeEventListener(THEME_EVENT, apply);
     };
-    applyTheme();
-    mediaDark.addEventListener('change', applyTheme);
-    return () => mediaDark.removeEventListener('change', applyTheme);
   }, [user?.settings_json.themePreference]);
 
   // Separate In-App Foreground Usage Timer
@@ -589,10 +669,16 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openSessionFlow = useCallback(
-    (bookId?: string, cureTargetSessionId?: string | null, challengeId?: string | null) => {
+    (
+      bookId?: string,
+      cureTargetSessionId?: string | null,
+      challengeId?: string | null,
+      duelId?: string | null
+    ) => {
       setSessionModalBookId(bookId ?? null);
       setSessionModalCureTargetId(cureTargetSessionId ?? null);
       setSessionModalChallengeId(challengeId ?? null);
+      setSessionModalDuelId(duelId ?? null);
       setSessionModalOpen(true);
     },
     []
@@ -602,6 +688,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     setSessionModalOpen(false);
     setSessionModalCureTargetId(null);
     setSessionModalChallengeId(null);
+    setSessionModalDuelId(null);
   }, []);
 
   const updateProfile = useCallback(
@@ -716,6 +803,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       isCureAttemptFor?: string | null;
       liveWatchRoomId?: string | null;
       challengeId?: string | null;
+      duelId?: string | null;
+      ereaderStartPercent?: number | null;
+      ereaderCheckpointVerified?: boolean;
       randomCheckScheduled: boolean;
     }): Promise<SessionDraft> => {
       if (!activeUserId) throw new Error('Sign in required');
@@ -738,6 +828,11 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         is_cure_attempt_for: params.isCureAttemptFor ?? null,
         live_watch_room_id: params.liveWatchRoomId ?? null,
         challenge_id: params.challengeId ?? null,
+        duel_id: params.duelId ?? null,
+        ereader_start_percent: params.ereaderStartPercent ?? null,
+        ereader_checkpoint_verified: Boolean(params.ereaderCheckpointVerified),
+        ereader_attention_checks: 0,
+        ereader_attention_checks_passed: 0,
         random_check_scheduled: params.randomCheckScheduled,
         random_check_completed: false,
         voice_check_result: null,
@@ -820,6 +915,13 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         startFrameSignature: draft.start_frame_signature,
         endFrameSignature: payload.endFrameSignature,
         strictChallengeMode: payload.strictChallengeMode,
+        ereaderCheckpointVerified:
+          draft.medium === 'ebook' && Boolean(draft.ereader_checkpoint_verified),
+        ereaderStartPercent: draft.ereader_start_percent ?? undefined,
+        ereaderEndPercent: payload.ereaderEndPercent,
+        ereaderAttentionChecks: payload.ereaderAttentionChecks ?? draft.ereader_attention_checks ?? 0,
+        ereaderAttentionChecksPassed:
+          payload.ereaderAttentionChecksPassed ?? draft.ereader_attention_checks_passed ?? 0,
         backgroundSeconds: draft.background_seconds,
         focusTransitions: draft.focus_transitions,
         voiceCheck: draft.voice_check_result ?? null,
@@ -857,6 +959,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       }
 
       const liveBoth = Boolean(draft.start_scanned_live && payload.endScannedLive);
+      const ereaderSeal = draft.medium === 'ebook' && Boolean(draft.ereader_checkpoint_verified);
 
       const newSession: ReadingSession = {
         id: sessionId,
@@ -873,6 +976,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         challenge_id: draft.challenge_id ?? null,
         verification_tier: scoring.verificationTier,
         trust_score: scoring.trustScore,
+        trust_scale: scoring.trustScale,
         predicted_minutes: scoring.predictedMinutes,
         actual_minutes: scoring.actualMinutes,
         wpm_observed: scoring.wpmObserved,
@@ -1062,22 +1166,27 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       if (isOnline) {
         await flushSyncQueue(activeUserId);
 
-        // Credit joined Challenges if session passed strict live anti-cheat verification!
-        if (scoring.challengeEligible && liveBoth) {
+        // Credit joined Challenges & 1v1 Duels if session passed strict live anti-cheat verification!
+        if (scoring.challengeEligible && (liveBoth || ereaderSeal)) {
           await fetch('/api/challenges', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action: 'record_verified_session',
               challengeId: draft.challenge_id ?? undefined,
+              duelId: draft.duel_id ?? undefined,
               verifiedMinutes: creditedMinutes,
               verifiedPages: pagesRead,
               trustScore: scoring.trustScore,
-              liveCameraVerified: true,
+              bookTitle: book.title,
+              liveCameraVerified: liveBoth,
+              medium: draft.medium,
               challengeEligible: true,
             }),
           }).catch(() => {});
-          await refreshChallenges();
+          await Promise.all([refreshChallenges(), refreshSocialAndDuels()]);
+        } else {
+          await refreshSocialAndDuels();
         }
       }
 
@@ -1087,7 +1196,16 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
       return newSession;
     },
-    [activeUserId, books, isOnline, refreshChallenges, sessions, user, verificationEvents]
+    [
+      activeUserId,
+      books,
+      isOnline,
+      refreshChallenges,
+      refreshSocialAndDuels,
+      sessions,
+      user,
+      verificationEvents,
+    ]
   );
 
   const createChallenge = useCallback(
@@ -1130,13 +1248,127 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         });
         const data = await res.json();
         if (!res.ok) return { ok: false, error: data.error || 'Challenge not found' };
-        await refreshChallenges();
+        await Promise.all([refreshChallenges(), refreshSocialAndDuels()]);
         return { ok: true };
       } catch {
         return { ok: false, error: 'Network error' };
       }
     },
-    [refreshChallenges]
+    [refreshChallenges, refreshSocialAndDuels]
+  );
+
+  const createDuel = useCallback(
+    async (params: {
+      title?: string;
+      metric: 'verified_minutes' | 'verified_pages';
+      targetValue: number;
+      durationHours: number;
+      invitedUsername?: string | null;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/duels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'create', ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Could not create duel' };
+        await refreshSocialAndDuels();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error' };
+      }
+    },
+    [refreshSocialAndDuels]
+  );
+
+  const acceptDuel = useCallback(
+    async (params: {
+      duelId?: string;
+      inviteCode?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/duels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'accept', ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Could not join duel' };
+        await refreshSocialAndDuels();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error' };
+      }
+    },
+    [refreshSocialAndDuels]
+  );
+
+  const declineDuel = useCallback(
+    async (duelId: string): Promise<void> => {
+      try {
+        await fetch('/api/duels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'decline', duelId }),
+        });
+        await refreshSocialAndDuels();
+      } catch {}
+    },
+    [refreshSocialAndDuels]
+  );
+
+  const toggleFollowReader = useCallback(
+    async (targetUserId: string): Promise<void> => {
+      try {
+        await fetch('/api/social', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'toggle_follow', targetUserId }),
+        });
+        await refreshSocialAndDuels();
+      } catch {}
+    },
+    [refreshSocialAndDuels]
+  );
+
+  const toggleSparkEvent = useCallback(
+    async (eventId: string): Promise<void> => {
+      // Optimistic spark so the tap feels instant even on a slow connection.
+      setActivityFeed((prev) =>
+        prev.map((ev) =>
+          ev.id === eventId
+            ? {
+                ...ev,
+                sparkedByMe: !ev.sparkedByMe,
+                sparkCount: Math.max(0, (ev.sparkCount ?? 0) + (ev.sparkedByMe ? -1 : 1)),
+              }
+            : ev
+        )
+      );
+      try {
+        const res = await fetch('/api/social', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'toggle_spark', eventId }),
+        });
+        if (!res.ok) {
+          await refreshSocialAndDuels();
+          return;
+        }
+        const data = (await res.json()) as { sparked: boolean; sparkCount: number };
+        setActivityFeed((prev) =>
+          prev.map((ev) =>
+            ev.id === eventId
+              ? { ...ev, sparkedByMe: data.sparked, sparkCount: data.sparkCount }
+              : ev
+          )
+        );
+      } catch {
+        // Offline: the optimistic state stays until the next refresh.
+      }
+    },
+    [refreshSocialAndDuels]
   );
 
   const addTbrItem = useCallback(
@@ -1314,6 +1546,10 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     tbrItems,
     dailyAggregates,
     challenges,
+    duels,
+    activityFeed,
+    readers,
+    mySocialProfile,
     activeDraft,
     pendingSyncCount,
     isOnline,
@@ -1331,6 +1567,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     sessionModalBookId,
     sessionModalCureTargetId,
     sessionModalChallengeId,
+    sessionModalDuelId,
     openSessionFlow,
     closeSessionFlow,
     showFirstSessionNotificationBanner,
@@ -1338,6 +1575,8 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
     selectedBookId,
     setSelectedBookId,
+    selectedReaderUsername,
+    setSelectedReaderUsername,
     addBookModalOpen,
     setAddBookModalOpen,
 
@@ -1354,8 +1593,14 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     completeReadingSession,
 
     refreshChallenges,
+    refreshSocialAndDuels,
     createChallenge,
     joinChallenge,
+    createDuel,
+    acceptDuel,
+    declineDuel,
+    toggleFollowReader,
+    toggleSparkEvent,
 
     addTbrItem,
     reorderTbrItems,

@@ -1,18 +1,33 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
-import { Barcode, BookPlus, Camera, Plus, Search, X } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Barcode, BookPlus, Camera, Loader2, Plus, Search, Sparkles, X } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { CatalogBookSeed } from '@/lib/domain/catalog';
 import { Book, BookGenre, GENRE_META, ReadingMedium } from '@/lib/types';
+
+type SearchResultBook = CatalogBookSeed & {
+  matchKind?: 'exact' | 'close' | 'similar';
+  matchScore?: number;
+};
 
 export function AddBookModal() {
   const { addBookModalOpen, setAddBookModalOpen, addBook, addTbrItem, books } = useBooklit();
   const [tab, setTab] = useState<'search' | 'barcode' | 'manual'>('search');
 
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<CatalogBookSeed[]>([]);
+  const [results, setResults] = useState<SearchResultBook[]>([]);
+  const [suggestions, setSuggestions] = useState<SearchResultBook[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Stable search: debounced, abortable, and monotonic so an older slow response
+  // can never overwrite the results of a newer query (that was the flicker bug).
+  const abortRef = useRef<AbortController | null>(null);
+  const requestSeqRef = useRef(0);
+  const cacheRef = useRef<
+    Map<string, { results: SearchResultBook[]; suggestions: SearchResultBook[] }>
+  >(new Map());
 
   const [isbnInput, setIsbnInput] = useState('');
   const [barcodeCameraOpen, setBarcodeCameraOpen] = useState(false);
@@ -42,22 +57,76 @@ export function AddBookModal() {
     setAddBookModalOpen(false);
   };
 
-  const runSearch = async (q: string) => {
-    setQuery(q);
-    if (!q.trim()) {
+  const executeSearch = useCallback(async (rawQuery: string) => {
+    const q = rawQuery.trim();
+    if (q.length < 2) {
+      abortRef.current?.abort();
+      requestSeqRef.current += 1;
       setResults([]);
+      setSuggestions([]);
+      setSearching(false);
+      setSearchError(null);
       return;
     }
+
+    const cached = cacheRef.current.get(q.toLowerCase());
+    if (cached) {
+      setResults(cached.results);
+      setSuggestions(cached.suggestions);
+      setSearching(false);
+      setSearchError(null);
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const seq = ++requestSeqRef.current;
+
     setSearching(true);
+    setSearchError(null);
+
     try {
-      const res = await fetch(`/api/books/search?q=${encodeURIComponent(q.trim())}`);
-      if (res.ok) {
-        const data = await res.json();
-        setResults(data.results ?? []);
+      const res = await fetch(`/api/books/search?q=${encodeURIComponent(q)}`, {
+        signal: controller.signal,
+      });
+      if (seq !== requestSeqRef.current) return;
+      if (!res.ok) {
+        setSearchError('Search is unavailable right now—try again or add the book manually.');
+        return;
+      }
+      const data = (await res.json()) as {
+        results?: SearchResultBook[];
+        suggestions?: SearchResultBook[];
+      };
+      const nextResults = data.results ?? [];
+      const nextSuggestions = data.suggestions ?? [];
+      cacheRef.current.set(q.toLowerCase(), {
+        results: nextResults,
+        suggestions: nextSuggestions,
+      });
+      setResults(nextResults);
+      setSuggestions(nextSuggestions);
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') return;
+      if (seq === requestSeqRef.current) {
+        setSearchError('Search is unavailable right now—try again or add the book manually.');
       }
     } finally {
-      setSearching(false);
+      if (seq === requestSeqRef.current) setSearching(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'search') return;
+    const handle = window.setTimeout(() => {
+      executeSearch(query);
+    }, 280);
+    return () => window.clearTimeout(handle);
+  }, [query, tab, executeSearch]);
+
+  const runSearch = (q: string) => {
+    setQuery(q);
   };
 
   const lookupIsbn = async (isbn: string) => {
@@ -235,16 +304,41 @@ export function AddBookModal() {
                   type="text"
                   value={query}
                   onChange={(e) => runSearch(e.target.value)}
-                  placeholder="Search title or author (e.g. Dune, Atomic Habits)…"
-                  className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs"
+                  placeholder="Search title, author, or a few letters (e.g. dun, herbert, atomic)…"
+                  className="w-full pl-9 pr-9 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs"
                 />
+                {searching && (
+                  <Loader2 className="w-4 h-4 text-emerald-600 absolute right-3 top-2.5 animate-spin" />
+                )}
+                {!searching && query.length > 0 && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => runSearch('')}
+                    className="absolute right-2.5 top-2.5 p-0.5 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
 
-              {searching && <p className="text-xs text-zinc-500">Searching catalog…</p>}
+              <p className="text-[11px] text-zinc-500">
+                Typo-tolerant: close and similar matches are shown too, not just exact titles.
+              </p>
+
+              {searchError && (
+                <p className="text-[11px] text-rose-600 dark:text-rose-400">{searchError}</p>
+              )}
 
               {!query.trim() && results.length === 0 && (
                 <p className="text-xs text-zinc-500 text-center py-6">
                   Search by title, author, or ISBN to add books to your library.
+                </p>
+              )}
+
+              {!searching && query.trim().length >= 2 && results.length === 0 && (
+                <p className="text-[11px] text-zinc-500">
+                  No close match found for “{query.trim()}”. Try fewer letters, or add it manually.
                 </p>
               )}
 
@@ -266,6 +360,12 @@ export function AddBookModal() {
                           <p className="text-[11px] text-zinc-500 truncate">
                             {item.author} · {item.page_count}p
                           </p>
+                          {item.matchKind && item.matchKind !== 'exact' && (
+                            <span className="inline-flex items-center gap-1 mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 font-medium">
+                              <Sparkles className="w-2.5 h-2.5" />
+                              {item.matchKind === 'close' ? 'Close match' : 'Similar'}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -295,6 +395,30 @@ export function AddBookModal() {
                   );
                 })}
               </div>
+
+              {suggestions.length > 0 && (
+                <div className="pt-1 space-y-2">
+                  <p className="text-[11px] font-medium text-zinc-500">Popular starters</p>
+                  {suggestions.map((item) => (
+                    <div
+                      key={`sug-${item.catalogId}`}
+                      className="flex items-center justify-between gap-3 p-2.5 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800 min-w-0"
+                    >
+                      <div className="min-w-0">
+                        <h3 className="text-xs font-semibold truncate">{item.title}</h3>
+                        <p className="text-[11px] text-zinc-500 truncate">{item.author}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAddSeed(item, 'reading')}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold shrink-0"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

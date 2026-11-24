@@ -4,6 +4,8 @@ import React, { useState } from 'react';
 import { ArrowRight, Camera, Lock, ShieldCheck, Trophy } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { BooklitLogo } from './BooklitLogo';
+import { ThemeToggle } from './ThemeToggle';
+import { InstallAppButton } from './InstallAppButton';
 import { BOOK_GENRES, BookGenre, GENRE_META, ReadingGoalType } from '@/lib/types';
 
 export function AuthLandingScreen() {
@@ -67,6 +69,8 @@ export function AuthLandingScreen() {
       <header className="w-full max-w-6xl mx-auto px-5 py-5 flex items-center justify-between">
         <BooklitLogo size="md" />
         <div className="flex items-center gap-2">
+          <ThemeToggle compact />
+          <InstallAppButton variant="icon" />
           <button
             type="button"
             onClick={() => {

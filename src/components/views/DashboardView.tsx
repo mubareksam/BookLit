@@ -4,6 +4,7 @@ import React, { useMemo } from 'react';
 import { format, isSameDay } from 'date-fns';
 import {
   AlertTriangle,
+  Award,
   BookOpen,
   ChevronRight,
   Clock,
@@ -11,11 +12,14 @@ import {
   Play,
   Plus,
   ShieldCheck,
+  Swords,
   Trophy,
 } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { GENRE_META } from '@/lib/types';
 import { predictBookFinish } from '@/lib/domain/speedModel';
+import { normalizeTrustScore } from '@/lib/domain/trust';
+import { computeAchievementBadges } from '@/lib/domain/badges';
 
 export function DashboardView() {
   const {
@@ -23,10 +27,12 @@ export function DashboardView() {
     books,
     sessions,
     challenges,
+    duels,
     activeDraft,
     openSessionFlow,
     setAddBookModalOpen,
     setSelectedBookId,
+    setSelectedReaderUsername,
     setActiveView,
   } = useBooklit();
 
@@ -56,9 +62,12 @@ export function DashboardView() {
   );
 
   const avgTrust = useMemo(() => {
-    if (sessions.length === 0) return 100;
+    if (sessions.length === 0) return 1000;
     const recent = sessions.slice(0, 6);
-    return Math.round(recent.reduce((acc, s) => acc + s.trust_score, 0) / recent.length);
+    return Math.round(
+      recent.reduce((acc, s) => acc + normalizeTrustScore(s.trust_score, s.trust_scale), 0) /
+        recent.length
+    );
   }, [sessions]);
 
   const primaryPred = useMemo(() => {
@@ -74,6 +83,28 @@ export function DashboardView() {
     () => challenges.filter((c) => c.participants.some((p) => p.userId === user?.id)),
     [challenges, user?.id]
   );
+
+  const myActiveDuels = useMemo(
+    () =>
+      duels.filter(
+        (d) =>
+          d.status === 'active' &&
+          (d.challenger.userId === user?.id || d.opponent?.userId === user?.id)
+      ),
+    [duels, user?.id]
+  );
+
+  const badgeSummary = useMemo(() => {
+    if (!user) return null;
+    return computeAchievementBadges({
+      userId: user.id,
+      streakCount: user.streak_count ?? 0,
+      books,
+      sessions,
+      challenges,
+      duels,
+    });
+  }, [user, books, sessions, challenges, duels]);
 
   return (
     <div className="space-y-5 pb-20 min-w-0">
@@ -238,41 +269,75 @@ export function DashboardView() {
             </div>
             <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/70 p-2.5">
               <div className="text-[11px] text-zinc-500 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3 text-emerald-600" /> Trust
+                <ShieldCheck className="w-3 h-3 text-emerald-600" /> Honest
               </div>
-              <div className="font-mono text-sm font-bold mt-0.5">{avgTrust}/100</div>
+              <div className="font-mono text-sm font-bold mt-0.5">{avgTrust}/1000</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Active Challenges Strip */}
-      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-600 shrink-0">
-            <Trophy className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-xs font-semibold truncate">
-              {myChallenges.length > 0
-                ? `${myChallenges.length} Active Challenge${myChallenges.length > 1 ? 's' : ''}`
-                : 'Compete in Live Camera Reading Challenges'}
+      {/* Active Challenges, 1v1 Duels & Rank Strip */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex items-center justify-between gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-600 shrink-0">
+              {myActiveDuels.length > 0 ? (
+                <Swords className="w-4 h-4" />
+              ) : (
+                <Trophy className="w-4 h-4" />
+              )}
             </div>
-            <p className="text-[11px] text-zinc-500 truncate">
-              {myChallenges.length > 0
-                ? myChallenges[0].title
-                : 'Create or join a verified leaderboard with friends.'}
-            </p>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold truncate">
+                {myActiveDuels.length > 0 || myChallenges.length > 0
+                  ? `${myChallenges.length} Challenge(s) · ${myActiveDuels.length} Active 1v1`
+                  : 'Challenges & 1v1 Reading Duels'}
+              </div>
+              <p className="text-[11px] text-zinc-500 truncate">
+                {myActiveDuels[0]?.title ||
+                  myChallenges[0]?.title ||
+                  'Compete live against friends or open lobbies.'}
+              </p>
+            </div>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setActiveView('challenges')}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 shrink-0"
+          >
+            Arena <ChevronRight className="w-3.5 h-3.5" />
+          </button>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setActiveView('challenges')}
-          className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 shrink-0"
-        >
-          Open Challenges <ChevronRight className="w-3.5 h-3.5" />
-        </button>
+        {badgeSummary && user && (
+          <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex items-center justify-between gap-3 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="p-2 rounded-xl bg-amber-500/10 text-amber-600 shrink-0">
+                <Award className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold truncate">
+                  {badgeSummary.rankTitle} ·{' '}
+                  {badgeSummary.badges.filter((b) => b.unlocked).length}/
+                  {badgeSummary.badges.length} Badges
+                </div>
+                <p className="text-[11px] text-zinc-500 truncate">
+                  @{user.username} · {badgeSummary.duelWins}W–{badgeSummary.duelLosses}L Duels
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSelectedReaderUsername(user.username)}
+              className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 shrink-0"
+            >
+              Profile <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Recent Sessions */}
@@ -319,7 +384,7 @@ export function DashboardView() {
                         : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
                     }`}
                   >
-                    {s.trust_score}
+                    {normalizeTrustScore(s.trust_score, s.trust_scale)}
                   </span>
                 </div>
               );

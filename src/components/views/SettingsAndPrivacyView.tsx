@@ -7,25 +7,43 @@ import {
   Lock,
   LogOut,
   ShieldCheck,
+  Smartphone,
   Trash2,
   UserCheck,
 } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { ReadingGoalType } from '@/lib/types';
+import { ThemeToggle } from '@/components/ThemeToggle';
+import { InstallAppButton, usePwaInstallState } from '@/components/InstallAppButton';
 
 export function SettingsAndPrivacyView() {
-  const { user, updateProfile, signOutAccount, exportUserData, deleteAccount } = useBooklit();
+  const {
+    user,
+    updateProfile,
+    signOutAccount,
+    exportUserData,
+    deleteAccount,
+    setSelectedReaderUsername,
+    refreshSocialAndDuels,
+  } = useBooklit();
   const [displayName, setDisplayName] = useState(user?.display_name ?? '');
+  const [bio, setBio] = useState(user?.bio ?? '');
+  const [profileVisibility, setProfileVisibility] = useState<'public' | 'private'>(
+    user?.profile_visibility ?? 'public'
+  );
   const [goalType, setGoalType] = useState<ReadingGoalType>(
     user?.reading_goal_type ?? 'minutes_day'
   );
   const [goalTarget, setGoalTarget] = useState<number>(user?.reading_goal_target ?? 30);
   const [savedToast, setSavedToast] = useState(false);
+  const installState = usePwaInstallState();
   const [confirmDeleteText, setConfirmDeleteText] = useState('');
 
   useEffect(() => {
     if (!user) return;
     setDisplayName(user.display_name);
+    setBio(user.bio ?? '');
+    setProfileVisibility(user.profile_visibility ?? 'public');
     setGoalType(user.reading_goal_type);
     setGoalTarget(user.reading_goal_target);
   }, [user]);
@@ -36,9 +54,12 @@ export function SettingsAndPrivacyView() {
     e.preventDefault();
     await updateProfile({
       display_name: displayName.trim() || user.display_name,
+      bio: bio.trim().slice(0, 120),
+      profile_visibility: profileVisibility,
       reading_goal_type: goalType,
       reading_goal_target: Math.max(1, Math.min(2000, goalTarget)),
     });
+    await refreshSocialAndDuels();
     setSavedToast(true);
     setTimeout(() => setSavedToast(false), 2000);
   };
@@ -80,9 +101,43 @@ export function SettingsAndPrivacyView() {
             </div>
           </div>
 
-          <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium shrink-0">
-            Verified Account
-          </span>
+          <button
+            type="button"
+            onClick={() => setSelectedReaderUsername(user.username)}
+            className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold shrink-0 hover:bg-emerald-500/20 transition"
+          >
+            View Public Card →
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+          <div className="sm:col-span-2 min-w-0">
+            <label className="block text-xs font-medium text-zinc-500 mb-1">
+              Short Bio (optional, max 120 chars)
+            </label>
+            <input
+              type="text"
+              maxLength={120}
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              placeholder="e.g. Sci-fi & history reader · Nightly 30m sprints"
+              className="w-full min-w-0 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs"
+            />
+          </div>
+
+          <div className="min-w-0">
+            <label className="block text-xs font-medium text-zinc-500 mb-1">
+              Profile Visibility
+            </label>
+            <select
+              value={profileVisibility}
+              onChange={(e) => setProfileVisibility(e.target.value as 'public' | 'private')}
+              className="w-full min-w-0 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs"
+            >
+              <option value="public">Public (@{user.username})</option>
+              <option value="private">Tetherers Only</option>
+            </select>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
@@ -156,6 +211,34 @@ export function SettingsAndPrivacyView() {
           </div>
         </div>
       </form>
+
+      {/* App & Appearance */}
+      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-3 min-w-0">
+        <div className="flex items-center gap-2 text-xs font-semibold">
+          <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>App & Appearance</span>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-xs font-medium">Theme</div>
+            <p className="text-[11px] text-zinc-500">Light, dark, or follow your device.</p>
+          </div>
+          <ThemeToggle />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-zinc-100 dark:border-zinc-800">
+          <div className="min-w-0">
+            <div className="text-xs font-medium">Install the app</div>
+            <p className="text-[11px] text-zinc-500">
+              {installState.isInstalled
+                ? 'Booklit is installed on this device.'
+                : 'Home-screen icon, full-screen reading, offline drafts.'}
+            </p>
+          </div>
+          <InstallAppButton />
+        </div>
+      </div>
 
       {/* Verification & Privacy Toggles */}
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-4 min-w-0">

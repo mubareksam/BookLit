@@ -98,6 +98,7 @@ export async function DELETE(req: NextRequest) {
     delete store.accountIdByEmail[authUser.email];
     delete store.accountIdByUsername[authUser.username];
     delete store.accountsById[authUser.id];
+    delete store.followsByUserId[authUser.id];
     writeServerStore(store);
 
     const res = NextResponse.json({ status: 'deleted', userId: authUser.id });
