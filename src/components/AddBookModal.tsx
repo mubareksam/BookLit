@@ -41,8 +41,8 @@ export function AddBookModal() {
   const [genre, setGenre] = useState<BookGenre>('literary_fiction');
   const [status, setStatus] = useState<Book['status']>('reading');
   const [medium, setMedium] = useState<ReadingMedium>('physical');
-
-  if (!addBookModalOpen) return null;
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -195,6 +195,9 @@ export function AddBookModal() {
   };
 
   const handleAddSeed = async (item: CatalogBookSeed, targetStatus: 'reading' | 'tbr') => {
+    setSaveError(null);
+    setSaving(true);
+    try {
     const created = await addBook({
       title: item.title,
       author: item.author,
@@ -214,11 +217,19 @@ export function AddBookModal() {
       await addTbrItem({ bookId: created.id });
     }
     closeModal();
+    } catch (err) {
+      setSaveError(`Could not add this book: ${(err as Error).message || 'unknown error'}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !author.trim()) return;
+    setSaveError(null);
+    setSaving(true);
+    try {
     const pages = Math.max(20, pageCount);
     const created = await addBook({
       title: title.trim(),
@@ -237,9 +248,19 @@ export function AddBookModal() {
     setTitle('');
     setAuthor('');
     closeModal();
+    } catch (err) {
+      setSaveError(`Could not add this book: ${(err as Error).message || 'unknown error'}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const existingTitles = new Set(books.map((b) => b.title.toLowerCase()));
+
+  // NOTE: this must stay below every hook call. Returning early above the
+  // useCallback/useEffect below would change the hook order between renders and
+  // crash the modal the moment it opens.
+  if (!addBookModalOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
@@ -296,6 +317,11 @@ export function AddBookModal() {
         </div>
 
         <div className="p-5 overflow-y-auto space-y-4">
+          {saveError && (
+            <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3 py-2 text-[11px] text-rose-600 dark:text-rose-400 break-words">
+              {saveError}
+            </div>
+          )}
           {tab === 'search' && (
             <div className="space-y-3">
               <div className="relative">
@@ -377,15 +403,17 @@ export function AddBookModal() {
                         <div className="flex gap-1.5 shrink-0">
                           <button
                             type="button"
+                            disabled={saving}
                             onClick={() => handleAddSeed(item, 'tbr')}
-                            className="px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[11px] font-medium"
+                            className="px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[11px] font-medium disabled:opacity-50"
                           >
                             + TBR
                           </button>
                           <button
                             type="button"
+                            disabled={saving}
                             onClick={() => handleAddSeed(item, 'reading')}
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold"
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold disabled:opacity-50"
                           >
                             Read
                           </button>
@@ -410,8 +438,9 @@ export function AddBookModal() {
                       </div>
                       <button
                         type="button"
+                        disabled={saving}
                         onClick={() => handleAddSeed(item, 'reading')}
-                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold shrink-0"
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold shrink-0 disabled:opacity-50"
                       >
                         Add
                       </button>

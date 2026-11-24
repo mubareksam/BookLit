@@ -126,3 +126,20 @@ link is still generated — in development the API returns it so you can test th
 flow, and the server log prints it; in production the reader is told plainly that
 email delivery is not configured. Signed-in readers can trigger the same link from
 **Profile → Sign-in & Password**.
+
+## Verifying a change
+
+```bash
+npx tsc --noEmit          # types
+npm test                  # domain, storage and sign-in invariants (headless)
+npm run build             # production build
+npm run dev               # in one terminal…
+npm run test:ui           # …then in another: jsdom smoke test
+```
+
+`npm run test:ui` mounts the real provider, auth screen and Add Book modal in
+jsdom (with fake IndexedDB and a cookie jar) and asserts the flows readers touch:
+sign-in screen renders, Google/setup hints appear, "Forgot password?" opens the
+reset form, account creation signs in, Add Book opens and its fuzzy search saves a
+book to both IndexedDB *and* the server store. It fails loudly on React errors
+such as a changed hook order.
