@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
     "lint": "next lint",
-    "test": "npx tsx scripts/verify-domain.ts && npx tsx scripts/verify-storage.ts && npx tsx scripts/verify-auth.ts"
+    "test": "npx tsx scripts/verify-domain.ts && npx tsx scripts/verify-storage.ts && npx tsx scripts/verify-auth.ts",
+    "test:ui": "tsx --tsconfig tsconfig.scripts.json scripts/verify-ui.tsx"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -29,10 +30,13 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.13.5",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "autoprefixer": "^10.4.20",
+    "fake-indexeddb": "^6.2.8",
+    "jsdom": "^31.0.1",
     "postcss": "^8.5.3",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.19.3",

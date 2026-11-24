@@ -79,14 +79,26 @@ export function sanitizeNext(next: string | null | undefined): string {
   return next.slice(0, 300);
 }
 
-/** Public origin of the request, honouring the proxy headers of hosted deploys. */
+/**
+ * Public origin of the request. Hosted deploys (and the Arena preview proxy)
+ * terminate TLS in front of the app, so the protocol comes from the proxy
+ * headers; the browser's Referer is the last resort so we never hand someone an
+ * http:// URL for an https:// page.
+ */
 export function resolveOrigin(req: { headers: Headers; url: string }): string {
-  const proto =
-    req.headers.get('x-forwarded-proto') ||
-    (process.env.NODE_ENV === 'production' ? 'https' : 'http');
-  const host = req.headers.get('x-forwarded-host') || req.headers.get('host');
-  const origin = host ? `${proto.split(',')[0]}://${host.split(',')[0]}` : new URL(req.url).origin;
-  return origin.replace(/\/$/, '');
+  const forwardedHost = req.headers.get('x-forwarded-host') || req.headers.get('host');
+  const host = forwardedHost ? forwardedHost.split(',')[0].trim() : new URL(req.url).host;
+  const forwardedProto = (req.headers.get('x-forwarded-proto') || '').split(',')[0].trim();
+
+  let proto = forwardedProto;
+  if (!proto) {
+    const referer = req.headers.get('referer') || req.headers.get('origin') || '';
+    if (referer.startsWith('https://')) proto = 'https';
+    else if (referer.startsWith('http://')) proto = 'http';
+    else proto = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+  }
+
+  return `${proto}://${host}`.replace(/\/$/, '');
 }
 
 export function getRedirectUri(req: { headers: Headers; url: string }): string {

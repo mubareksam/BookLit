@@ -66,7 +66,9 @@ export function AuthLandingScreen() {
   const [providers, setProviders] = useState<{
     google: boolean;
     emailDelivery: boolean;
-  }>({ google: true, emailDelivery: true });
+    redirectUri: string | null;
+  }>({ google: true, emailDelivery: true, redirectUri: null });
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -114,7 +116,9 @@ export function AuthLandingScreen() {
         setProviders({
           google: Boolean(data.google?.configured),
           emailDelivery: Boolean(data.passwordReset?.emailDelivery),
+          redirectUri: data.google?.redirectUri ?? null,
         });
+        setProvidersLoaded(true);
       })
       .catch(() => {});
 
@@ -226,6 +230,17 @@ export function AuthLandingScreen() {
 
   const handleGoogle = () => {
     setErrorMsg(null);
+    // Known-unconfigured: explain exactly what to whitelist instead of bouncing
+    // the reader through a redirect that cannot succeed.
+    if (providersLoaded && !providers.google) {
+      setErrorCode('google_unconfigured');
+      setErrorMsg(
+        `Google sign-in is not enabled on this deployment yet. In Google Cloud Console → Credentials → your OAuth client, add ${
+          providers.redirectUri ?? 'this site’s /api/auth/google/callback'
+        } as an authorized redirect URI, then set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the server.`
+      );
+      return;
+    }
     const next = window.location.pathname || '/';
     window.location.href = `/api/auth/google/start?next=${encodeURIComponent(next)}`;
   };
