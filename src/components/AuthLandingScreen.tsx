@@ -1,7 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
-import { ArrowRight, Camera, Lock, ShieldCheck, Trophy } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  ArrowRight,
+  Camera,
+  CheckCircle2,
+  ChevronLeft,
+  Lock,
+  Mail,
+  ShieldCheck,
+  Trophy,
+} from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { findLocalUserByIdentifier } from '@/lib/db/dexie';
 import { BooklitLogo } from './BooklitLogo';
@@ -9,10 +18,55 @@ import { ThemeToggle } from './ThemeToggle';
 import { InstallAppButton } from './InstallAppButton';
 import { BOOK_GENRES, BookGenre, GENRE_META, ReadingGoalType } from '@/lib/types';
 
-export function AuthLandingScreen() {
-  const { signInAccount, registerAccount, recoverAccount } = useBooklit();
+function googleErrorMessage(code: string): string {
+  switch (code) {
+    case 'google_unconfigured':
+      return 'Google sign-in is not switched on for this deployment yet. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the server, then try again.';
+    case 'google_cancelled':
+      return 'Google sign-in was cancelled.';
+    case 'google_state_mismatch':
+      return 'That Google sign-in attempt timed out. Please try again.';
+    case 'too_many_attempts':
+      return 'Too many attempts from this address. Try again in a few minutes.';
+    case 'storage_unwritable':
+      return 'Google verified you, but Booklit could not save the account durably. Configure a database (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY) or a persistent disk, then try again.';
+    default:
+      return 'Google sign-in could not be completed. Please try again.';
+  }
+}
 
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+function GoogleIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 48 48" aria-hidden="true">
+      <path
+        fill="#EA4335"
+        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+      />
+      <path
+        fill="#4285F4"
+        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+      />
+      <path
+        fill="#34A853"
+        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+      />
+    </svg>
+  );
+}
+
+export function AuthLandingScreen() {
+  const { signInAccount, registerAccount, recoverAccount, requestPasswordReset, resetPassword } =
+    useBooklit();
+
+  const [mode, setMode] = useState<'signin' | 'signup' | 'forgot' | 'reset'>('signin');
+  const [providers, setProviders] = useState<{
+    google: boolean;
+    emailDelivery: boolean;
+  }>({ google: true, emailDelivery: true });
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -35,12 +89,67 @@ export function AuthLandingScreen() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // Forgot / reset password
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
+  const [resetDevLink, setResetDevLink] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState('');
+  const [resetTarget, setResetTarget] = useState<{ username: string; email: string } | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
   const [goalType, setGoalType] = useState<ReadingGoalType>('minutes_day');
   const [goalTarget, setGoalTarget] = useState<number>(30);
   const [selectedGenres, setSelectedGenres] = useState<BookGenre[]>([
     'general_nonfiction',
     'literary_fiction',
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/providers')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        setProviders({
+          google: Boolean(data.google?.configured),
+          emailDelivery: Boolean(data.passwordReset?.emailDelivery),
+        });
+      })
+      .catch(() => {});
+
+    // Google sends readers back to "/?auth_error=…"; reset links land on "/?reset=…".
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get('auth_error');
+    if (authError) {
+      setErrorMsg(googleErrorMessage(authError));
+      setErrorCode(authError);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    const token = params.get('reset');
+    if (token) {
+      setMode('reset');
+      setResetToken(token);
+      fetch(`/api/auth/password/verify?token=${encodeURIComponent(token)}`)
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({}));
+          if (cancelled) return;
+          if (!res.ok) {
+            setErrorMsg(data.error || 'This reset link is invalid or has expired.');
+          } else {
+            setResetTarget({ username: data.username, email: data.email });
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setErrorMsg('Could not check this reset link. Try again.');
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const toggleGenre = (g: BookGenre) => {
     setSelectedGenres((prev) =>
@@ -115,6 +224,65 @@ export function AuthLandingScreen() {
     if (!res.ok) setErrorMsg(res.error || 'Unable to create account');
   };
 
+  const handleGoogle = () => {
+    setErrorMsg(null);
+    const next = window.location.pathname || '/';
+    window.location.href = `/api/auth/google/start?next=${encodeURIComponent(next)}`;
+  };
+
+  const handleSendReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setResetNotice(null);
+    setResetDevLink(null);
+    setBusy(true);
+    const res = await requestPasswordReset(resetEmail);
+    setBusy(false);
+    if (!res.ok) {
+      setErrorMsg(res.error || 'Could not send the reset link.');
+      return;
+    }
+    if (res.delivery === 'email') {
+      setResetNotice(res.message ?? 'Check your inbox for the reset link.');
+    } else {
+      setResetNotice(
+        res.delivery === 'failed'
+          ? 'The reset link could not be delivered by the server’s email provider. Try again in a moment.'
+          : 'The server has no email provider configured yet (RESEND_API_KEY), so the link could not be delivered.'
+      );
+    }
+    if (res.devLink) setResetDevLink(res.devLink);
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    if (newPassword !== confirmPassword) {
+      setErrorMsg('Those passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    const res = await resetPassword({ token: resetToken, password: newPassword });
+    setBusy(false);
+    if (!res.ok) {
+      setErrorMsg(res.error || 'Could not reset the password.');
+      return;
+    }
+    window.history.replaceState({}, '', window.location.pathname);
+  };
+
+  const backToSignIn = () => {
+    setMode('signin');
+    setErrorMsg(null);
+    setResetNotice(null);
+    setResetDevLink(null);
+    setNewPassword('');
+    setConfirmPassword('');
+    if (window.location.search.includes('reset=')) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  };
+
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-zinc-50 dark:bg-[#090B0E] text-zinc-900 dark:text-zinc-100 flex flex-col justify-between">
       {/* Clean Top Bar */}
@@ -127,7 +295,7 @@ export function AuthLandingScreen() {
             type="button"
             onClick={() => {
               setErrorMsg(null);
-              setMode(mode === 'signin' ? 'signup' : 'signin');
+              setMode(mode === 'signup' || mode === 'signin' ? (mode === 'signin' ? 'signup' : 'signin') : 'signin');
             }}
             className="px-3.5 py-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800 text-xs font-medium hover:bg-zinc-100 dark:hover:bg-zinc-900 transition"
           >
@@ -187,7 +355,29 @@ export function AuthLandingScreen() {
         {/* Right: Auth Card */}
         <div className="lg:col-span-6 w-full max-w-md mx-auto">
           <div className="rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/90 p-6 sm:p-7 shadow-xl space-y-5">
-            {/* Mode Switcher */}
+            {(mode === 'forgot' || mode === 'reset') && (
+              <div className="space-y-1.5">
+                <button
+                  type="button"
+                  onClick={backToSignIn}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 transition"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" /> Back to sign in
+                </button>
+                <h2 className="text-lg font-semibold tracking-tight">
+                  {mode === 'forgot' ? 'Forgot your password?' : 'Choose a new password'}
+                </h2>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {mode === 'forgot'
+                    ? 'Enter the email you registered with and we will send a one-time reset link.'
+                    : resetTarget
+                    ? `For @${resetTarget.username} · ${resetTarget.email}`
+                    : 'Checking this link…'}
+                </p>
+              </div>
+            )}
+
+            {(mode === 'signin' || mode === 'signup') && (
             <div className="grid grid-cols-2 rounded-xl bg-zinc-100 dark:bg-zinc-800/80 p-1">
               <button
                 type="button"
@@ -218,6 +408,27 @@ export function AuthLandingScreen() {
                 Create Account
               </button>
             </div>
+            )}
+
+            {(mode === 'signin' || mode === 'signup') && (
+              <div className="space-y-4">
+                <button
+                  type="button"
+                  onClick={handleGoogle}
+                  className="w-full py-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-sm font-semibold text-zinc-800 dark:text-zinc-100 inline-flex items-center justify-center gap-2.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/80 transition"
+                >
+                  <GoogleIcon className="w-4 h-4" />
+                  {mode === 'signup' ? 'Sign up with Google' : 'Continue with Google'}
+                </button>
+                <div className="flex items-center gap-3">
+                  <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+                  <span className="text-[10px] uppercase tracking-wider text-zinc-400">
+                    or use email
+                  </span>
+                  <span className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
+                </div>
+              </div>
+            )}
 
             {errorMsg && (
               <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3.5 py-2.5 text-xs font-medium text-rose-600 dark:text-rose-400 space-y-2">
@@ -255,6 +466,15 @@ export function AuthLandingScreen() {
                     {recoverMsg && <p className="text-[11px] font-normal">{recoverMsg}</p>}
                   </div>
                 )}
+                {errorCode === 'USE_GOOGLE' && (
+                  <button
+                    type="button"
+                    onClick={handleGoogle}
+                    className="px-2.5 py-1 rounded-lg bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-[11px] font-semibold inline-flex items-center gap-1.5"
+                  >
+                    <GoogleIcon className="w-3 h-3" /> Continue with Google
+                  </button>
+                )}
                 {errorCode === 'WRONG_PASSWORD' && (
                   <p className="text-[11px] font-normal">
                     Tip: passwords are case-sensitive. If you signed up on another device, use the
@@ -264,7 +484,100 @@ export function AuthLandingScreen() {
               </div>
             )}
 
-            {mode === 'signin' ? (
+            {mode === 'forgot' ? (
+              <form onSubmit={handleSendReset} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    value={resetEmail}
+                    onChange={(e) => setResetEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/70 px-3.5 py-2.5 text-sm focus:outline-none focus:border-emerald-600"
+                  />
+                </div>
+
+                {resetNotice && (
+                  <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3.5 py-2.5 text-[11px] text-emerald-700 dark:text-emerald-400 space-y-2">
+                    <p className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{resetNotice}</span>
+                    </p>
+                    {resetDevLink && (
+                      <a
+                        href={resetDevLink}
+                        className="inline-block px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold"
+                      >
+                        Open reset link (dev)
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <Mail className="w-4 h-4" />
+                  {busy ? 'Sending link…' : 'Email me a reset link'}
+                </button>
+
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 text-center">
+                  Signed up with Google? Use “Continue with Google” — no password needed.
+                </p>
+                {!providers.emailDelivery && (
+                  <p className="text-[10px] text-amber-600 dark:text-amber-400 text-center">
+                    Server email delivery is not configured yet, so the link cannot be sent by email.
+                  </p>
+                )}
+              </form>
+            ) : mode === 'reset' ? (
+              <form onSubmit={handleResetPassword} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    New password (min 8 characters)
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="At least 8 characters"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/70 px-3.5 py-2.5 text-sm focus:outline-none focus:border-emerald-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    Confirm password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Repeat your new password"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/70 px-3.5 py-2.5 text-sm focus:outline-none focus:border-emerald-600"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={busy || !resetTarget}
+                  className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  {busy ? 'Saving…' : 'Save password & sign in'}
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </form>
+            ) : mode === 'signin' ? (
               <form onSubmit={handleSignIn} className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
@@ -294,6 +607,20 @@ export function AuthLandingScreen() {
                     placeholder="••••••••"
                     className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/70 px-3.5 py-2.5 text-sm focus:outline-none focus:border-emerald-600"
                   />
+                </div>
+
+                <div className="flex justify-end -mt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('forgot');
+                      setErrorMsg(null);
+                      setResetEmail(identifier.includes('@') ? identifier.trim() : '');
+                    }}
+                    className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400 hover:underline"
+                  >
+                    Forgot password?
+                  </button>
                 </div>
 
                 <button

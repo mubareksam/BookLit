@@ -1,41 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { attachSessionCookie, verifyPassword } from '@/lib/server/auth';
+import { normalizeIdentifier, resolveAccountId } from '@/lib/server/accounts';
 import {
   checkAuthAttemptLimit,
   clearAuthAttemptLimit,
   ensureStoreHydrated,
   persistStoreNow,
   readServerStore,
-  ServerDataShape,
 } from '@/lib/server/store';
-
-function normalizeIdentifier(raw: string): string {
-  return raw.trim().replace(/^@+/, '').replace(/\s+/g, '').toLowerCase();
-}
-
-/**
- * Resolve an email OR @username to an account. Falls back to scanning accounts
- * so an account created before an index existed (or restored from an older
- * backup) can always sign in — and the index is repaired in place.
- */
-function resolveAccountId(store: ServerDataShape, identifier: string): string | null {
-  const byEmail = store.accountIdByEmail[identifier];
-  if (byEmail && store.accountsById[byEmail]) return byEmail;
-
-  const byUsername = store.accountIdByUsername[identifier];
-  if (byUsername && store.accountsById[byUsername]) return byUsername;
-
-  for (const [userId, account] of Object.entries(store.accountsById)) {
-    const email = (account.user.email ?? '').trim().toLowerCase();
-    const username = (account.user.username ?? '').trim().replace(/^@+/, '').toLowerCase();
-    if (email === identifier || username === identifier) {
-      store.accountIdByEmail[email] = userId;
-      store.accountIdByUsername[username] = userId;
-      return userId;
-    }
-  }
-  return null;
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -79,6 +51,15 @@ export async function POST(req: NextRequest) {
     }
 
     const account = store.accountsById[userId];
+    if (!account.passwordHash) {
+      return NextResponse.json(
+        {
+          error: `@${account.user.username} signs in with Google. Continue with Google, or use “Forgot password?” to set a password for this email.`,
+          code: 'USE_GOOGLE',
+        },
+        { status: 409 }
+      );
+    }
     if (!verifyPassword(password, account.passwordSalt, account.passwordHash)) {
       return NextResponse.json(
         {

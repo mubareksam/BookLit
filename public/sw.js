@@ -1,4 +1,4 @@
-const CACHE_NAME = 'booklit-shell-v3';
+const CACHE_NAME = 'booklit-shell-v4';
 const OFFLINE_ASSETS = [
   '/',
   '/manifest.webmanifest',
