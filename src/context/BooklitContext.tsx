@@ -141,6 +141,19 @@ interface BooklitContextValue {
     password: string;
   }) => Promise<{ ok: boolean; error?: string; code?: string }>;
   signOutAccount: () => Promise<void>;
+  /** Ask the server to email a one-time password-reset link. */
+  requestPasswordReset: (email: string) => Promise<{
+    ok: boolean;
+    error?: string;
+    message?: string;
+    delivery?: 'email' | 'failed' | 'unconfigured';
+    devLink?: string;
+  }>;
+  /** Finish a reset: installs the new password and signs the reader in. */
+  resetPassword: (params: {
+    token: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string; code?: string }>;
   /** Re-create this device's account on a server that lost its data. */
   recoverAccount: (params: {
     userId: string;
@@ -710,6 +723,66 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [refreshSocialAndDuels]
+  );
+
+  const requestPasswordReset = useCallback(
+    async (
+      email: string
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      message?: string;
+      delivery?: 'email' | 'failed' | 'unconfigured';
+      devLink?: string;
+    }> => {
+      try {
+        const res = await fetch('/api/auth/password/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Could not send the reset link.' };
+        return {
+          ok: true,
+          message: data.message,
+          delivery: data.delivery,
+          devLink: data.devLink,
+        };
+      } catch {
+        return { ok: false, error: 'Network error while requesting a reset link.' };
+      }
+    },
+    []
+  );
+
+  const resetPassword = useCallback(
+    async (params: { token: string; password: string }): Promise<{
+      ok: boolean;
+      error?: string;
+      code?: string;
+    }> => {
+      try {
+        const res = await fetch('/api/auth/password/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          return { ok: false, error: data.error || 'Could not reset the password.', code: data.code };
+        }
+
+        await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
+        window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
+        setActiveUserId(data.user.id);
+        setActiveView('dashboard');
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while resetting the password.' };
+      }
+    },
+    []
   );
 
   const signOutAccount = useCallback(async () => {
@@ -1639,6 +1712,8 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     registerAccount,
     signInAccount,
     signOutAccount,
+    requestPasswordReset,
+    resetPassword,
     recoverAccount,
 
     updateProfile,

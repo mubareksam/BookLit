@@ -19,8 +19,19 @@ import {
 
 export interface StoredAccountRecord {
   user: UserProfile;
+  /** Empty for Google-only accounts that never chose a password. */
   passwordSalt: string;
   passwordHash: string;
+  /** Google "sub" claim — stable per Google account, used to match sign-ins. */
+  googleSubject?: string | null;
+}
+
+export interface PasswordResetRecord {
+  accountId: string;
+  email: string;
+  requestedAt: string;
+  expiresAt: string;
+  usedAt?: string | null;
 }
 
 export interface UserCloudBucket {
@@ -37,6 +48,10 @@ export interface ServerDataShape {
   accountsById: Record<string, StoredAccountRecord>;
   accountIdByEmail: Record<string, string>;
   accountIdByUsername: Record<string, string>;
+  /** Google subject → account id (Google sign-in lookup). */
+  accountIdByGoogleSub: Record<string, string>;
+  /** sha256(reset token) → pending reset. Tokens themselves are never stored. */
+  passwordResets: Record<string, PasswordResetRecord>;
   usersData: Record<string, UserCloudBucket>;
   liveWatchRooms: Record<string, LiveWatchSession>;
   challenges: Record<string, ReadingChallenge>;
@@ -50,13 +65,15 @@ export interface ServerDataShape {
   schemaVersion?: number;
 }
 
-export const STORE_SCHEMA_VERSION = 3;
+export const STORE_SCHEMA_VERSION = 4;
 
 function createEmptyStore(): ServerDataShape {
   return {
     accountsById: {},
     accountIdByEmail: {},
     accountIdByUsername: {},
+    accountIdByGoogleSub: {},
+    passwordResets: {},
     usersData: {},
     liveWatchRooms: {},
     challenges: {},
@@ -76,6 +93,8 @@ function normalizeStore(parsed: Partial<ServerDataShape> | null | undefined): Se
     accountsById: parsed.accountsById ?? {},
     accountIdByEmail: parsed.accountIdByEmail ?? {},
     accountIdByUsername: parsed.accountIdByUsername ?? {},
+    accountIdByGoogleSub: parsed.accountIdByGoogleSub ?? {},
+    passwordResets: parsed.passwordResets ?? {},
     usersData: parsed.usersData ?? {},
     liveWatchRooms: parsed.liveWatchRooms ?? {},
     challenges: parsed.challenges ?? {},
@@ -290,4 +309,28 @@ export function checkAuthAttemptLimit(identifier: string): {
 
 export function clearAuthAttemptLimit(identifier: string): void {
   authAttemptBuckets.delete(identifier.trim().toLowerCase());
+}
+
+// ---- Password reset throttling ---------------------------------------------
+const passwordResetBuckets = new Map<string, number[]>();
+
+/** At most 5 reset emails per address per 15 minutes. */
+export function checkPasswordResetRateLimit(key: string): {
+  allowed: boolean;
+  retryAfterSeconds: number;
+} {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxRequests = 5;
+  const bucketKey = key.trim().toLowerCase();
+
+  const history = (passwordResetBuckets.get(bucketKey) ?? []).filter((ts) => now - ts < windowMs);
+  if (history.length >= maxRequests) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((windowMs - history[0]) / 1000));
+    passwordResetBuckets.set(bucketKey, history);
+    return { allowed: false, retryAfterSeconds };
+  }
+  history.push(now);
+  passwordResetBuckets.set(bucketKey, history);
+  return { allowed: true, retryAfterSeconds: 0 };
 }

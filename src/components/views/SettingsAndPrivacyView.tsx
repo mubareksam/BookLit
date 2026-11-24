@@ -7,8 +7,10 @@ import {
   CloudUpload,
   Database,
   Download,
+  KeyRound,
   Lock,
   LogOut,
+  Mail,
   ShieldCheck,
   Smartphone,
   Trash2,
@@ -28,7 +30,9 @@ export function SettingsAndPrivacyView() {
     deleteAccount,
     setSelectedReaderUsername,
     refreshSocialAndDuels,
+    requestPasswordReset,
   } = useBooklit();
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(user?.display_name ?? '');
   const [bio, setBio] = useState(user?.bio ?? '');
   const [profileVisibility, setProfileVisibility] = useState<'public' | 'private'>(
@@ -326,6 +330,48 @@ export function SettingsAndPrivacyView() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Sign-in & password */}
+      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-2 min-w-0">
+        <div className="flex items-center gap-2 text-xs font-semibold">
+          <KeyRound className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>Sign-in & Password</span>
+          <span className="ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300">
+            {user?.auth_provider === 'google' ? 'Google' : 'Email & password'}
+          </span>
+        </div>
+        <p className="text-[11px] text-zinc-500 leading-relaxed">
+          {user?.email} — {user?.auth_provider === 'google'
+            ? 'you can keep using Google, or set a password for this email as a backup.'
+            : 'your password is stored only as a salted hash on the server.'}
+        </p>
+        <button
+          type="button"
+          onClick={async () => {
+            if (!user?.email) return;
+            setPasswordNotice('Sending…');
+            const res = await requestPasswordReset(user.email);
+            if (!res.ok) {
+              setPasswordNotice(res.error || 'Could not send the reset link.');
+              return;
+            }
+            setPasswordNotice(
+              res.delivery === 'email'
+                ? `Reset link sent to ${user.email}. Check your inbox (and spam).`
+                : res.delivery === 'failed'
+                ? 'The server could not deliver the email. Try again shortly.'
+                : 'Email delivery is not configured on this server (RESEND_API_KEY).'
+            );
+          }}
+          disabled={!user?.email || passwordNotice === 'Sending…'}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-zinc-200 dark:border-zinc-700 text-[11px] font-semibold hover:bg-zinc-50 dark:hover:bg-zinc-800 transition disabled:opacity-50"
+        >
+          <Mail className="w-3.5 h-3.5" /> Email me a reset link
+        </button>
+        {passwordNotice && passwordNotice !== 'Sending…' && (
+          <p className="text-[10px] text-zinc-500 dark:text-zinc-400 break-words">{passwordNotice}</p>
+        )}
       </div>
 
       {/* Data durability */}

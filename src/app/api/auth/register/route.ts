@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { attachSessionCookie, hashPassword } from '@/lib/server/auth';
+import { attachSessionCookie } from '@/lib/server/auth';
+import { createAccount, resolveAccountIdByEmail } from '@/lib/server/accounts';
 import {
   clearAuthAttemptLimit,
   ensureStoreHydrated,
@@ -8,7 +9,7 @@ import {
   persistStoreNow,
   readServerStore,
 } from '@/lib/server/store';
-import { BOOK_GENRES, UserProfile } from '@/lib/types';
+import { BOOK_GENRES } from '@/lib/types';
 
 const RegisterSchema = z.object({
   email: z.string().email('Enter a valid email address'),
@@ -43,7 +44,7 @@ export async function POST(req: NextRequest) {
     const cleanUsername = username.trim().replace(/^@+/, '').toLowerCase();
 
     const store = readServerStore();
-    if (store.accountIdByEmail[cleanEmail]) {
+    if (store.accountIdByEmail[cleanEmail] || resolveAccountIdByEmail(store, cleanEmail)) {
       return NextResponse.json(
         { error: 'An account with this email already exists. Please sign in.' },
         { status: 409 }
@@ -56,67 +57,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const userId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const nowIso = new Date().toISOString();
-    const { salt, hash } = hashPassword(password);
-
-    const user: UserProfile = {
-      id: userId,
-      username: cleanUsername,
+    const { userId, user } = createAccount(store, {
       email: cleanEmail,
-      display_name: displayName.trim(),
-      auth_provider: 'email_password',
+      username: cleanUsername,
+      displayName,
+      password,
+      authProvider: 'email_password',
       timezone,
-      created_at: nowIso,
-      reading_goal_type: goalType,
-      reading_goal_target: goalTarget,
-      preferred_genres: preferredGenres.length > 0 ? preferredGenres : ['general_nonfiction'],
-      strike_count: 0,
-      streak_count: 0,
-      last_verified_session_at: null,
-      settings_json: {
-        comprehensionOptIn: false,
-        challengeMode: false,
-        retainAudioForDebug: false,
-        whisperModeDefault: false,
-        analyticsConsent: false,
-        notificationsPromptedAfterFirstSession: false,
-        notificationsEnabled: false,
-        cameraExplainerSeen: false,
-        micExplainerSeen: false,
-        streakInsuranceAvailable: true,
-        streakInsuranceLastUsedMonth: null,
-        themePreference: 'system',
-        reminderWindows: [
-          {
-            id: 'rem-default',
-            label: 'Daily Reading Window',
-            startTime: '20:30',
-            durationMinutes: 30,
-            days: [1, 2, 3, 4, 5],
-            enabled: false,
-            channel: 'local_push',
-          },
-        ],
-      },
-    };
-
-    store.accountsById[userId] = {
-      user,
-      passwordSalt: salt,
-      passwordHash: hash,
-    };
-    store.accountIdByEmail[cleanEmail] = userId;
-    store.accountIdByUsername[cleanUsername] = userId;
-    store.usersData[userId] = {
-      profile: user,
-      books: {},
-      sessions: {},
-      verificationEvents: {},
-      tbr: {},
-      dailyAggregates: {},
-      updatedAt: nowIso,
-    };
+      goalType,
+      goalTarget,
+      preferredGenres,
+    });
 
     // Persist immediately (local disk + remote database when configured) so the
     // account definitely exists before the reader is signed in.

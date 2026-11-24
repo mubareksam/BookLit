@@ -80,3 +80,49 @@ atomically with a `.backup` revision, so a crashed write can never wipe history.
   tethers, sparks, duel and challenge entries) as well as local data.
 - Existing `.data/booklit-prod-v2.json` files from older versions keep working and
   are automatically lifted to the current schema on first load.
+
+## Sign-in methods
+
+Booklit supports three ways into the same account — all of them land on the same
+user id, so books, sessions, tethers and sparks stay intact whichever you use.
+
+| Method | Where it is configured |
+| --- | --- |
+| Email + password | always on |
+| Google (sign in **and** create account) | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` |
+| Forgot password (one-time email link) | `RESEND_API_KEY` (+ `BOOKLIT_MAIL_FROM`) |
+
+### Google Sign-In
+
+1. Google Cloud Console → **APIs & Services → OAuth consent screen** → publish (External, Testing is fine for your own account).
+2. **Credentials → Create credentials → OAuth client ID → Web application**.
+3. Add the authorized redirect URI exactly as the server will send it:
+   `https://<your-domain>/api/auth/google/callback`
+   (local: `http://localhost:3000/api/auth/google/callback`).
+4. Set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in the environment and redeploy.
+
+Behaviour:
+
+- New Google account → an account is created with a handle derived from the email
+  (`leul.tesfaye@gmail.com` → `leul_tesfaye`, auto-suffixed if taken). The handle can
+  be changed later in Profile.
+- Google email already registered with a password → the two are **linked**: same
+  user id, same history, password sign-in keeps working.
+- Tokens are verified server-side against Google's JWKS (signature, issuer,
+  audience, expiry) and the email must be verified by Google. A failed or forged
+  callback never creates a session.
+- If `GOOGLE_*` is not set, the button still explains that the deployment has not
+  enabled it yet — it never half-signs anyone in.
+
+### Forgot password
+
+`POST /api/auth/password/request` issues a **single-use, 60-minute** token for the
+email on file and emails `<your-site>/?reset=<token>`. Tokens are stored only as
+SHA-256 hashes, are invalidated after use, and a newer request kills older links.
+The response is identical for unknown addresses (no account enumeration).
+
+Email delivery uses [Resend](https://resend.com) (`RESEND_API_KEY`). Without it the
+link is still generated — in development the API returns it so you can test the
+flow, and the server log prints it; in production the reader is told plainly that
+email delivery is not configured. Signed-in readers can trigger the same link from
+**Profile → Sign-in & Password**.

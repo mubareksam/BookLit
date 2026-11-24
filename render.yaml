@@ -31,3 +31,15 @@ services:
       # Set this when using a Render persistent disk (e.g. /var/data/booklit).
       - key: BOOKLIT_DATA_DIR
         sync: false
+      # Google Sign-In. Redirect URI to whitelist in Google Cloud Console:
+      # https://<your-service>.onrender.com/api/auth/google/callback
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      # Password-reset email delivery (Resend). Without it, reset links are
+      # generated but cannot be emailed.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: BOOKLIT_MAIL_FROM
+        sync: false

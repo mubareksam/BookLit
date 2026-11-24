@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
     "lint": "next lint",
-    "test": "npx tsx scripts/verify-domain.ts && npx tsx scripts/verify-storage.ts"
+    "test": "npx tsx scripts/verify-domain.ts && npx tsx scripts/verify-storage.ts && npx tsx scripts/verify-auth.ts"
   },
   "engines": {
     "node": ">=20.0.0"
