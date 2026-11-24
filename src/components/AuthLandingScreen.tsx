@@ -3,17 +3,28 @@
 import React, { useState } from 'react';
 import { ArrowRight, Camera, Lock, ShieldCheck, Trophy } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
+import { findLocalUserByIdentifier } from '@/lib/db/dexie';
 import { BooklitLogo } from './BooklitLogo';
 import { ThemeToggle } from './ThemeToggle';
 import { InstallAppButton } from './InstallAppButton';
 import { BOOK_GENRES, BookGenre, GENRE_META, ReadingGoalType } from '@/lib/types';
 
 export function AuthLandingScreen() {
-  const { signInAccount, registerAccount } = useBooklit();
+  const { signInAccount, registerAccount, recoverAccount } = useBooklit();
 
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [needsAccount, setNeedsAccount] = useState(false);
+  const [recoverable, setRecoverable] = useState<{
+    userId: string;
+    username: string;
+    email: string;
+    displayName: string;
+  } | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const [recoverMsg, setRecoverMsg] = useState<string | null>(null);
 
   // Sign in fields
   const [identifier, setIdentifier] = useState('');
@@ -40,10 +51,51 @@ export function AuthLandingScreen() {
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setErrorCode(null);
+    setNeedsAccount(false);
     setBusy(true);
     const res = await signInAccount({ identifier, password: loginPassword });
     setBusy(false);
-    if (!res.ok) setErrorMsg(res.error || 'Unable to sign in');
+    if (!res.ok) {
+      setErrorMsg(res.error || 'Unable to sign in');
+      setErrorCode(res.code ?? null);
+      setNeedsAccount(res.code === 'ACCOUNT_NOT_FOUND');
+
+      // This browser may still hold the reader's library from an earlier
+      // session on a server that lost its data — offer a one-tap recovery.
+      if (res.code === 'ACCOUNT_NOT_FOUND') {
+        const local = await findLocalUserByIdentifier(identifier).catch(() => null);
+        setRecoverable(
+          local
+            ? {
+                userId: local.id,
+                username: local.username,
+                email: local.email,
+                displayName: local.display_name,
+              }
+            : null
+        );
+      } else {
+        setRecoverable(null);
+      }
+    } else {
+      setRecoverable(null);
+    }
+  };
+
+  const handleRecover = async () => {
+    if (!recoverable) return;
+    setRecovering(true);
+    setRecoverMsg(null);
+    const res = await recoverAccount({
+      userId: recoverable.userId,
+      email: recoverable.email,
+      username: recoverable.username,
+      displayName: recoverable.displayName,
+      password: loginPassword,
+    });
+    setRecovering(false);
+    if (!res.ok) setRecoverMsg(res.error || 'Could not recover this account.');
   };
 
   const handleSignUp = async (e: React.FormEvent) => {
@@ -168,8 +220,47 @@ export function AuthLandingScreen() {
             </div>
 
             {errorMsg && (
-              <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3.5 py-2.5 text-xs font-medium text-rose-600 dark:text-rose-400">
-                {errorMsg}
+              <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3.5 py-2.5 text-xs font-medium text-rose-600 dark:text-rose-400 space-y-2">
+                <p>{errorMsg}</p>
+                {needsAccount && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmail(identifier.includes('@') ? identifier.trim() : '');
+                      setUsername(identifier.includes('@') ? '' : identifier.replace(/^@+/, ''));
+                      setErrorMsg(null);
+                      setNeedsAccount(false);
+                      setMode('signup');
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-[11px] font-semibold"
+                  >
+                    Create that account →
+                  </button>
+                )}
+                {recoverable && (
+                  <div className="space-y-1.5 pt-1">
+                    <p className="text-[11px] font-normal">
+                      This device still has your library saved for{' '}
+                      <span className="font-mono">@{recoverable.username}</span>. Re-create the
+                      account with the password above to keep all of it.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleRecover}
+                      disabled={recovering || loginPassword.length < 8}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold disabled:opacity-40"
+                    >
+                      {recovering ? 'Restoring…' : `Restore @${recoverable.username} & keep my data`}
+                    </button>
+                    {recoverMsg && <p className="text-[11px] font-normal">{recoverMsg}</p>}
+                  </div>
+                )}
+                {errorCode === 'WRONG_PASSWORD' && (
+                  <p className="text-[11px] font-normal">
+                    Tip: passwords are case-sensitive. If you signed up on another device, use the
+                    same email or @username you registered with.
+                  </p>
+                )}
               </div>
             )}
 

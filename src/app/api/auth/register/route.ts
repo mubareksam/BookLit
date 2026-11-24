@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { attachSessionCookie, hashPassword } from '@/lib/server/auth';
-import { readServerStore, writeServerStore } from '@/lib/server/store';
+import {
+  clearAuthAttemptLimit,
+  ensureStoreHydrated,
+  getStoreDiagnostics,
+  persistStoreNow,
+  readServerStore,
+} from '@/lib/server/store';
 import { BOOK_GENRES, UserProfile } from '@/lib/types';
 
 const RegisterSchema = z.object({
@@ -21,6 +27,7 @@ const RegisterSchema = z.object({
 
 export async function POST(req: NextRequest) {
   try {
+    await ensureStoreHydrated();
     const raw = await req.json();
     const parsed = RegisterSchema.safeParse(raw);
     if (!parsed.success) {
@@ -33,7 +40,7 @@ export async function POST(req: NextRequest) {
     const { email, username, displayName, password, timezone, goalType, goalTarget, preferredGenres } =
       parsed.data;
     const cleanEmail = email.trim().toLowerCase();
-    const cleanUsername = username.trim().toLowerCase();
+    const cleanUsername = username.trim().replace(/^@+/, '').toLowerCase();
 
     const store = readServerStore();
     if (store.accountIdByEmail[cleanEmail]) {
@@ -111,11 +118,28 @@ export async function POST(req: NextRequest) {
       updatedAt: nowIso,
     };
 
-    writeServerStore(store);
+    // Persist immediately (local disk + remote database when configured) so the
+    // account definitely exists before the reader is signed in.
+    const persisted = await persistStoreNow(store);
+    if (!persisted) {
+      const diagnostics = getStoreDiagnostics();
+      return NextResponse.json(
+        {
+          error:
+            'Account could not be saved durably on this server. Configure SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY (or a persistent disk) and try again.',
+          code: 'STORAGE_UNWRITABLE',
+          storage: diagnostics,
+        },
+        { status: 503 }
+      );
+    }
+    clearAuthAttemptLimit(cleanUsername);
+    clearAuthAttemptLimit(cleanEmail);
 
     const res = NextResponse.json({
       user,
       snapshot: store.usersData[userId],
+      storage: getStoreDiagnostics(),
     });
     attachSessionCookie(res, userId);
     return res;

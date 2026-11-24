@@ -2,7 +2,10 @@
 
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
+  CloudUpload,
+  Database,
   Download,
   Lock,
   LogOut,
@@ -37,6 +40,27 @@ export function SettingsAndPrivacyView() {
   const [goalTarget, setGoalTarget] = useState<number>(user?.reading_goal_target ?? 30);
   const [savedToast, setSavedToast] = useState(false);
   const installState = usePwaInstallState();
+  const [storageHealth, setStorageHealth] = useState<{
+    backend?: string;
+    durable?: boolean;
+    remoteConfigured?: boolean;
+    lastSavedAt?: string | null;
+    lastSaveError?: string | null;
+    lastRemoteError?: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.storage) setStorageHealth(data.storage);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [confirmDeleteText, setConfirmDeleteText] = useState('');
 
   useEffect(() => {
@@ -302,6 +326,44 @@ export function SettingsAndPrivacyView() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Data durability */}
+      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 space-y-2 min-w-0">
+        <div className="flex items-center gap-2 text-xs font-semibold">
+          <Database className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>Account & Data Storage</span>
+          {storageHealth?.durable ? (
+            <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+              <CloudUpload className="w-3 h-3" /> Durable
+            </span>
+          ) : (
+            <span className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="w-3 h-3" /> Temporary
+            </span>
+          )}
+        </div>
+
+        <p className="text-[11px] text-zinc-500 leading-relaxed">
+          {storageHealth?.durable
+            ? `Sign-in, tethers, sparks, duels and reading history are written to ${
+                storageHealth.backend === 'supabase' ? 'your Supabase database' : 'a persistent server disk'
+              } and survive app updates and restarts.`
+            : storageHealth
+            ? 'This deployment is using instance-local storage: data survives restarts but can be erased when the app is redeployed or the instance is replaced. Add SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (or attach a persistent disk) so accounts, tethers and history are never lost.'
+            : 'Checking where your data is stored…'}
+        </p>
+
+        {storageHealth?.lastSavedAt && (
+          <p className="text-[10px] text-zinc-400 font-mono break-words">
+            Last durable write: {new Date(storageHealth.lastSavedAt).toLocaleString()}
+          </p>
+        )}
+        {(storageHealth?.lastSaveError || storageHealth?.lastRemoteError) && (
+          <p className="text-[10px] text-rose-600 dark:text-rose-400 break-words">
+            {storageHealth.lastRemoteError || storageHealth.lastSaveError}
+          </p>
+        )}
       </div>
 
       {/* Data Export */}

@@ -1,6 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getAuthenticatedUser } from '@/lib/server/auth';
-import { readServerStore, ServerDataShape, writeServerStore } from '@/lib/server/store';
+import {
+  NextRequest,
+  NextResponse } from 'next/server'; import { getAuthenticatedUser } from '@/lib/server/auth'; import { readServerStore,
+  ServerDataShape,
+  ensureStoreHydrated,
+  writeServerStore,
+} from '@/lib/server/store';
 import { computeAchievementBadges } from '@/lib/domain/badges';
 import { scoreField } from '@/lib/domain/fuzzySearch';
 import { normalizeTrustScore } from '@/lib/domain/trust';
@@ -114,6 +118,7 @@ function decorateFeed(store: ServerDataShape, viewerUserId: string) {
 }
 
 export async function GET(req: NextRequest) {
+  await ensureStoreHydrated();
   const viewer = getAuthenticatedUser(req);
   if (!viewer) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });
@@ -188,6 +193,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureStoreHydrated();
   const viewer = getAuthenticatedUser(req);
   if (!viewer) {
     return NextResponse.json({ error: 'Sign in required' }, { status: 401 });

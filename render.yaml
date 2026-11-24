@@ -5,8 +5,29 @@ services:
     plan: free
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm run start
+    # Persistent disk alternative to Supabase (available on paid instance types).
+    # Create it, then set BOOKLIT_DATA_DIR to the mount path.
+    # disk:
+    #   name: booklit-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: 22.14.0
       - key: NEXT_TELEMETRY_DISABLED
         value: "1"
+      # Signs session cookies. Generated once and kept stable so signing in
+      # survives every future deploy.
+      - key: BOOKLIT_AUTH_SECRET
+        generateValue: true
+      # Optional but recommended: durable account + social data store.
+      # Fill these in the Render dashboard (create the table with the SQL in README).
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: BOOKLIT_SUPABASE_TABLE
+        value: booklit_store
+      # Set this when using a Render persistent disk (e.g. /var/data/booklit).
+      - key: BOOKLIT_DATA_DIR
+        sync: false

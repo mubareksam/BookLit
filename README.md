@@ -25,3 +25,58 @@ npm install
 npm test        # Runs domain invariant verification suite
 npm run dev     # Starts Next.js server on 0.0.0.0:3000
 ```
+
+## Durable accounts & data (survive app updates)
+
+Every account, tether (follow), spark (like), 1v1 duel, challenge and cloud
+reading snapshot is stored in **one server-side document**. Booklit resolves the
+most durable place to keep it:
+
+| Order | Backend | Survives redeploys | How to enable |
+| --- | --- | --- | --- |
+| 1 | **Supabase / Postgres REST** | ✅ | `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` |
+| 2 | **Persistent disk** | ✅ | `BOOKLIT_DATA_DIR=/var/data/booklit` + a mounted disk |
+| 3 | **Local `.data/` folder** | ❌ (dev only) | default |
+
+When neither 1 nor 2 is configured, the app still works, but the server has only
+temporary storage — **Profile → Account & Data Storage** (and `GET /api/health`)
+will show a *Temporary* warning so you know accounts can be lost on a redeploy.
+
+### Option A — Supabase (recommended, free tier works)
+
+Run this once in the Supabase SQL editor:
+
+```sql
+create table if not exists public.booklit_store (
+  id text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+-- Server-only access: the service role key is used from API routes.
+alter table public.booklit_store enable row level security;
+```
+
+Then set these environment variables (Render → Environment, or `.env.local`):
+
+```
+SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+BOOKLIT_SUPABASE_TABLE=booklit_store
+BOOKLIT_AUTH_SECRET=<long random string, keep it stable>
+```
+
+### Option B — Persistent disk
+
+Mount a disk (Render: *Disk → mount path `/var/data`*, paid instance types) and
+set `BOOKLIT_DATA_DIR=/var/data/booklit`. The JSON document is written
+atomically with a `.backup` revision, so a crashed write can never wipe history.
+
+### Notes
+
+- Sign-in restores the reader's cloud snapshot into IndexedDB; local data is
+  merge-only (never dropped) and IndexedDB is namespaced per account.
+- "Delete Account" now permanently removes the server record (account, snapshots,
+  tethers, sparks, duel and challenge entries) as well as local data.
+- Existing `.data/booklit-prod-v2.json` files from older versions keep working and
+  are automatically lifted to the current schema on first load.
