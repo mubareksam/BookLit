@@ -1,9 +1,11 @@
-const CACHE_NAME = 'booklit-shell-v2';
+const CACHE_NAME = 'booklit-shell-v3';
 const OFFLINE_ASSETS = [
   '/',
   '/manifest.webmanifest',
   '/icons/icon-192.svg',
   '/icons/icon-512.svg',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
 ];
 
 self.addEventListener('install', (event) => {
