@@ -228,19 +228,36 @@ export function AuthLandingScreen() {
     if (!res.ok) setErrorMsg(res.error || 'Unable to create account');
   };
 
-  const handleGoogle = () => {
+  const handleGoogle = async () => {
     setErrorMsg(null);
-    // Known-unconfigured: explain exactly what to whitelist instead of bouncing
-    // the reader through a redirect that cannot succeed.
-    if (providersLoaded && !providers.google) {
+
+    // If the capability probe has not landed yet (slow first paint), ask again
+    // instead of navigating into a flow that may not be configured.
+    let googleConfigured = providers.google;
+    let redirectUri = providers.redirectUri;
+    if (!providersLoaded) {
+      try {
+        const res = await fetch('/api/auth/providers');
+        const data = await res.json();
+        googleConfigured = Boolean(data.google?.configured);
+        redirectUri = data.google?.redirectUri ?? null;
+        setProviders((prev) => ({ ...prev, google: googleConfigured, redirectUri }));
+        setProvidersLoaded(true);
+      } catch {
+        googleConfigured = true; // let the server give the verdict
+      }
+    }
+
+    if (!googleConfigured) {
       setErrorCode('google_unconfigured');
       setErrorMsg(
         `Google sign-in is not enabled on this deployment yet. In Google Cloud Console → Credentials → your OAuth client, add ${
-          providers.redirectUri ?? 'this site’s /api/auth/google/callback'
+          redirectUri ?? 'this site’s /api/auth/google/callback'
         } as an authorized redirect URI, then set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET on the server.`
       );
       return;
     }
+
     const next = window.location.pathname || '/';
     window.location.href = `/api/auth/google/start?next=${encodeURIComponent(next)}`;
   };

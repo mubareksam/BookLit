@@ -51,6 +51,7 @@ import {
 
 export type ActiveNavView =
   | 'dashboard'
+  | 'social'
   | 'challenges'
   | 'library'
   | 'tbr'

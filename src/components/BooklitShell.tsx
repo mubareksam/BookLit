@@ -16,6 +16,7 @@ import {
   Settings,
   ShieldCheck,
   Trophy,
+  Users,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -33,6 +34,7 @@ import { StatsView } from '@/components/views/StatsView';
 import { RecommendationsAndRecapView } from '@/components/views/RecommendationsAndRecapView';
 import { LiveWatchView } from '@/components/views/LiveWatchView';
 import { SettingsAndPrivacyView } from '@/components/views/SettingsAndPrivacyView';
+import { SocialView } from '@/components/views/SocialView';
 import { SessionRunnerModal } from '@/components/SessionRunnerModal';
 import { AddBookModal } from '@/components/AddBookModal';
 import { BookDetailDrawer } from '@/components/BookDetailDrawer';
@@ -49,6 +51,13 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Today', shortLabel: 'Today', icon: Home, hint: 'Goals & next action' },
+  {
+    id: 'social',
+    label: 'Feed & Readers',
+    shortLabel: 'Feed',
+    icon: Users,
+    hint: 'Verified activity & tethers',
+  },
   {
     id: 'challenges',
     label: 'Arena',
@@ -86,19 +95,21 @@ const NAV_ITEMS: NavItem[] = [
 /** Bottom navigation: exactly four thumb-reachable tabs. */
 const BOTTOM_TABS: Array<{ id: ActiveNavView | 'more'; label: string; icon: NavItem['icon'] }> = [
   { id: 'dashboard', label: 'Today', icon: Home },
+  { id: 'social', label: 'Feed', icon: Users },
   { id: 'library', label: 'Library', icon: BookOpen },
-  { id: 'challenges', label: 'Arena', icon: Trophy },
   { id: 'more', label: 'More', icon: Layers },
 ];
 
 /** Grouped overflow so similar destinations stack instead of sprawling. */
 const MORE_GROUPS: Array<{ title: string; ids: ActiveNavView[] }> = [
+  { title: 'Compete', ids: ['challenges'] },
   { title: 'Reading', ids: ['tbr', 'sessions'] },
   { title: 'Insights', ids: ['stats', 'recommendations', 'live_watch'] },
   { title: 'Account', ids: ['settings'] },
 ];
 
 const SIDEBAR_GROUPS: Array<{ title: string; ids: ActiveNavView[] }> = [
+  { title: 'Social', ids: ['social'] },
   { title: 'Read', ids: ['dashboard', 'library', 'tbr'] },
   { title: 'Compete', ids: ['challenges', 'sessions'] },
   { title: 'Insights', ids: ['stats', 'recommendations', 'live_watch'] },
@@ -162,7 +173,7 @@ export function BooklitShell() {
 
   const bottomTabsActive = (id: ActiveNavView | 'more') =>
     id === 'more'
-      ? !['dashboard', 'library', 'challenges'].includes(activeView)
+      ? !['dashboard', 'social', 'library'].includes(activeView)
       : activeView === id;
 
   return (
@@ -319,6 +330,7 @@ export function BooklitShell() {
         <main className="flex-1 w-full max-w-5xl mx-auto px-3.5 sm:px-6 py-5 pb-28 lg:pb-10 min-w-0 overflow-x-hidden">
           <InstallPwaAndNotificationBanners />
           {activeView === 'dashboard' && <DashboardView />}
+          {activeView === 'social' && <SocialView />}
           {activeView === 'challenges' && <ChallengesView />}
           {activeView === 'library' && <LibraryView />}
           {activeView === 'tbr' && <TbrView />}

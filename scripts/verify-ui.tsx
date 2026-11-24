@@ -95,6 +95,7 @@ async function main() {
   const { BooklitProvider, useBooklit } = await import('../src/context/BooklitContext');
   const { AuthLandingScreen } = await import('../src/components/AuthLandingScreen');
   const { AddBookModal } = await import('../src/components/AddBookModal');
+  const { SocialView } = await import('../src/components/views/SocialView');
 
   const consoleErrors: string[] = [];
   const originalError = console.error;
@@ -117,6 +118,7 @@ async function main() {
       'div',
       null,
       c.ready && !c.user ? React.createElement(AuthLandingScreen) : null,
+      c.ready && c.user ? React.createElement(SocialView) : null,
       React.createElement(AddBookModal),
       React.createElement(Probe)
     );
@@ -203,6 +205,21 @@ async function main() {
   await waitFor(() => Boolean(ctx?.user), 'signed-in user');
   await waitFor(() => !byText('Sign In'), 'auth screen to unmount');
 
+  // 2b. The social surface is a first-class destination with nested tabs
+  await waitFor(() => Boolean(byText('Activity')) && Boolean(byText('Readers')), 'social tabs');
+  await act(async () => {
+    byText('Readers')!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  assert.ok(
+    window.document.querySelector('input[placeholder*="Find readers"]'),
+    'Readers tab must expose the reader search'
+  );
+  await act(async () => {
+    byText('Activity')!.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+
   // 3. Open Add Book — this used to crash with a React hook-order error
   await act(async () => {
     ctx!.setAddBookModalOpen(true);
@@ -273,7 +290,7 @@ async function main() {
   assert.deepEqual(fatal, [], `unexpected runtime errors: ${fatal.join(' | ')}`);
 
   console.log(
-    '✓ UI smoke test passed (auth screen, create account, Add Book modal, fuzzy search, book saved).'
+    '✓ UI smoke test passed (auth, create account, Feed/Readers tabs, Add Book, fuzzy search, saved to server).'
   );
   console.error = originalError;
   process.exit(0);
