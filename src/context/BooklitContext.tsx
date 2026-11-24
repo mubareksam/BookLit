@@ -16,7 +16,8 @@ import {
   BookGenre,
   DailyAggregate,
   GENRE_META,
-  LiveWatchSession,
+  ReadingChallenge,
+  ReadingGoalType,
   ReadingMedium,
   ReadingSession,
   SessionDraft,
@@ -29,21 +30,18 @@ import {
   db,
   deleteUserAccountData,
   enqueueSyncItem,
-  ensureDatabaseSeeded,
   exportAllUserDataCsv,
   exportAllUserDataJson,
   flushSyncQueue,
+  hydrateUserSnapshotIntoDexie,
   recordAppForegroundSeconds,
 } from '@/lib/db/dexie';
-import { DEFAULT_USER_ID, buildSeedData } from '@/lib/db/seed';
 import { estimateUserGenreSpeed } from '@/lib/domain/speedModel';
-import {
-  findCurableStrikeSession,
-  scoreReadingSession,
-} from '@/lib/domain/verificationEngine';
+import { findCurableStrikeSession, scoreReadingSession } from '@/lib/domain/verificationEngine';
 
 export type ActiveNavView =
   | 'dashboard'
+  | 'challenges'
   | 'library'
   | 'tbr'
   | 'sessions'
@@ -51,8 +49,6 @@ export type ActiveNavView =
   | 'stats'
   | 'recommendations'
   | 'live_watch'
-  | 'year_in_books'
-  | 'how_it_works'
   | 'settings';
 
 export type InteractionProfile = 'desktop' | 'pwa';
@@ -62,56 +58,68 @@ interface CompleteSessionPayload {
   endPage: number;
   endWordsOnPage?: number;
   endScanConfidence?: number;
+  endFrameSignature?: string | null;
+  endScannedLive?: boolean;
   hasTier1ScanOrImport: boolean;
-  overrideElapsedMinutes?: number; // For testing / manual progress import
+  strictChallengeMode?: boolean;
   notes?: string;
 }
 
 interface BooklitContextValue {
   ready: boolean;
   user: UserProfile | null;
-  allUsers: UserProfile[];
   books: Book[];
   sessions: ReadingSession[];
   verificationEvents: VerificationEvent[];
   tbrItems: TBRItem[];
   dailyAggregates: DailyAggregate[];
-  liveWatchRooms: LiveWatchSession[];
+  challenges: ReadingChallenge[];
   activeDraft: SessionDraft | null;
   pendingSyncCount: number;
   isOnline: boolean;
-  simulateOffline: boolean;
-  setSimulateOffline: (val: boolean) => void;
   triggerManualSync: () => Promise<void>;
 
-  // Navigation & UI profile
   activeView: ActiveNavView;
   setActiveView: (v: ActiveNavView) => void;
   interactionProfile: InteractionProfile;
-  isCoarsePointerDetected: boolean;
   isStandalonePwa: boolean;
   globalSearchQuery: string;
   setGlobalSearchQuery: (q: string) => void;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
 
-  // Session Runner Modal state
   sessionModalOpen: boolean;
   sessionModalBookId: string | null;
   sessionModalCureTargetId: string | null;
-  openSessionFlow: (bookId?: string, cureTargetSessionId?: string | null) => void;
+  sessionModalChallengeId: string | null;
+  openSessionFlow: (
+    bookId?: string,
+    cureTargetSessionId?: string | null,
+    challengeId?: string | null
+  ) => void;
   closeSessionFlow: () => void;
-  lastCompletedSession: ReadingSession | null;
-  clearLastCompletedSession: () => void;
   showFirstSessionNotificationBanner: boolean;
   dismissFirstSessionNotificationBanner: () => void;
 
-  // Book Detail & Add Book Modal
   selectedBookId: string | null;
   setSelectedBookId: (id: string | null) => void;
   addBookModalOpen: boolean;
   setAddBookModalOpen: (open: boolean) => void;
-  authModalOpen: boolean;
-  setAuthModalOpen: (open: boolean) => void;
+
+  // Auth Actions
+  registerAccount: (params: {
+    email: string;
+    username: string;
+    displayName: string;
+    password: string;
+    goalType: ReadingGoalType;
+    goalTarget: number;
+    preferredGenres: BookGenre[];
+  }) => Promise<{ ok: boolean; error?: string }>;
+  signInAccount: (params: {
+    identifier: string;
+    password: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  signOutAccount: () => Promise<void>;
 
   // Domain Actions
   updateProfile: (
@@ -119,16 +127,6 @@ interface BooklitContextValue {
       settingsPatch?: Partial<UserSettings>;
     }
   ) => Promise<void>;
-  signInOrCreateAccount: (params: {
-    email: string;
-    displayName: string;
-    provider: UserProfile['auth_provider'];
-    goalType?: UserProfile['reading_goal_type'];
-    goalTarget?: number;
-    preferredGenres?: BookGenre[];
-  }) => Promise<void>;
-  switchActiveUser: (userId: string) => Promise<void>;
-  resetDemoWorkspace: () => Promise<void>;
 
   addBook: (input: {
     title: string;
@@ -153,14 +151,35 @@ interface BooklitContextValue {
     startPage: number;
     startWordsOnPage?: number;
     startScanConfidence?: number;
+    startFrameSignature?: string | null;
+    startScannedLive?: boolean;
+    startExtractedSnippet?: string;
     isCureAttemptFor?: string | null;
     liveWatchRoomId?: string | null;
+    challengeId?: string | null;
     randomCheckScheduled: boolean;
   }) => Promise<SessionDraft>;
   updateSessionDraft: (draftId: string, patch: Partial<SessionDraft>) => Promise<void>;
   discardSessionDraft: (draftId: string) => Promise<void>;
   completeReadingSession: (payload: CompleteSessionPayload) => Promise<ReadingSession>;
 
+  // Challenges
+  refreshChallenges: () => Promise<void>;
+  createChallenge: (params: {
+    title: string;
+    description: string;
+    metric: 'verified_minutes' | 'verified_pages';
+    targetValue: number;
+    durationDays: number;
+    visibility: 'public' | 'private';
+    strictVerification: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  joinChallenge: (params: {
+    challengeId?: string;
+    inviteCode?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
+
+  // TBR
   addTbrItem: (params: {
     bookId?: string | null;
     freeTextTitle?: string;
@@ -184,68 +203,91 @@ const BooklitContext = createContext<BooklitContextValue | null>(null);
 
 export function BooklitProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
-  const [activeUserId, setActiveUserId] = useState<string>(DEFAULT_USER_ID);
+  const [activeUserId, setActiveUserId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<ActiveNavView>('dashboard');
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [isOnlineBrowser, setIsOnlineBrowser] = useState(true);
-  const [simulateOffline, setSimulateOffline] = useState(false);
-  const [isCoarsePointerDetected, setIsCoarsePointerDetected] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [isCoarseOrMobile, setIsCoarseOrMobile] = useState(false);
   const [isStandalonePwa, setIsStandalonePwa] = useState(false);
+
+  const [challenges, setChallenges] = useState<ReadingChallenge[]>([]);
 
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [sessionModalBookId, setSessionModalBookId] = useState<string | null>(null);
   const [sessionModalCureTargetId, setSessionModalCureTargetId] = useState<string | null>(null);
-  const [lastCompletedSession, setLastCompletedSession] = useState<ReadingSession | null>(null);
+  const [sessionModalChallengeId, setSessionModalChallengeId] = useState<string | null>(null);
   const [showFirstSessionNotificationBanner, setShowFirstSessionNotificationBanner] =
     useState(false);
 
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
   const [addBookModalOpen, setAddBookModalOpen] = useState(false);
-  const [authModalOpen, setAuthModalOpen] = useState(false);
 
-  // Initialize Dexie seed + URL shortcuts + Service Worker
+  // Check active session cookie on load (or offline cached profile if offline)
   useEffect(() => {
     let mounted = true;
-    ensureDatabaseSeeded().then((uid) => {
-      if (!mounted) return;
-      setActiveUserId(uid);
-      setReady(true);
-    });
+
+    async function bootstrapAuth() {
+      try {
+        const res = await fetch('/api/auth/me');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.user) {
+            await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
+            if (typeof window !== 'undefined') {
+              window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
+            }
+            if (mounted) setActiveUserId(data.user.id);
+          } else {
+            if (typeof window !== 'undefined') {
+              window.localStorage.removeItem('booklit_last_auth_uid');
+            }
+            if (mounted) setActiveUserId(null);
+          }
+        }
+      } catch {
+        // Offline boot: check if a real authenticated user was previously stored locally
+        if (typeof window !== 'undefined') {
+          const lastUid = window.localStorage.getItem('booklit_last_auth_uid');
+          if (lastUid && db) {
+            const cached = await db.users.get(lastUid);
+            if (cached && mounted) setActiveUserId(cached.id);
+          }
+        }
+      } finally {
+        if (mounted) setReady(true);
+      }
+    }
+
+    bootstrapAuth();
 
     if (typeof window !== 'undefined') {
-      setIsOnlineBrowser(navigator.onLine);
-      const handleOnline = () => setIsOnlineBrowser(true);
-      const handleOffline = () => setIsOnlineBrowser(false);
+      setIsOnline(navigator.onLine);
+      const handleOnline = () => setIsOnline(true);
+      const handleOffline = () => setIsOnline(false);
       window.addEventListener('online', handleOnline);
       window.addEventListener('offline', handleOffline);
 
-      // Media queries for (pointer: coarse) and standalone display-mode
       const coarseMq = window.matchMedia('(pointer: coarse)');
       const standaloneMq = window.matchMedia('(display-mode: standalone)');
-      const updatePointer = () => {
-        setIsCoarsePointerDetected(coarseMq.matches || window.innerWidth < 768);
-        setIsStandalonePwa(
+      const updateEnv = () => {
+        const standalone =
           standaloneMq.matches ||
-            Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone) ||
-            window.location.search.includes('pwa=1')
-        );
+          Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone) ||
+          window.location.search.includes('pwa=1');
+        setIsStandalonePwa(standalone);
+        setIsCoarseOrMobile(standalone || coarseMq.matches || window.innerWidth < 768);
       };
-      updatePointer();
-      coarseMq.addEventListener('change', updatePointer);
-      standaloneMq.addEventListener('change', updatePointer);
-      window.addEventListener('resize', updatePointer);
+      updateEnv();
+      coarseMq.addEventListener('change', updateEnv);
+      standaloneMq.addEventListener('change', updateEnv);
+      window.addEventListener('resize', updateEnv);
 
-      // Handle manifest shortcut query params
       const params = new URLSearchParams(window.location.search);
-      if (params.get('action') === 'start-session') {
-        setSessionModalOpen(true);
-      } else if (params.get('view') === 'tbr') {
-        setActiveView('tbr');
-      }
+      if (params.get('action') === 'start-session') setSessionModalOpen(true);
+      else if (params.get('view') === 'tbr') setActiveView('tbr');
 
-      // Register PWA Service Worker
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
       }
@@ -254,31 +296,23 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         mounted = false;
         window.removeEventListener('online', handleOnline);
         window.removeEventListener('offline', handleOffline);
-        coarseMq.removeEventListener('change', updatePointer);
-        standaloneMq.removeEventListener('change', updatePointer);
-        window.removeEventListener('resize', updatePointer);
+        coarseMq.removeEventListener('change', updateEnv);
+        standaloneMq.removeEventListener('change', updateEnv);
+        window.removeEventListener('resize', updateEnv);
       };
     }
   }, []);
 
-  const isOnline = isOnlineBrowser && !simulateOffline;
-
-  // Live Dexie reactive queries
   const user = useLiveQuery(
-    async () => (ready && db ? (await db.users.get(activeUserId)) ?? null : null),
+    async () =>
+      ready && activeUserId && db ? (await db.users.get(activeUserId)) ?? null : null,
     [ready, activeUserId],
     null
   );
 
-  const allUsers = useLiveQuery(
-    async () => (ready && db ? await db.users.toArray() : []),
-    [ready],
-    []
-  );
-
   const books = useLiveQuery(
     async () =>
-      ready && db
+      ready && activeUserId && db
         ? (await db.books.where('user_id').equals(activeUserId).toArray()).sort(
             (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
           )
@@ -289,7 +323,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const sessions = useLiveQuery(
     async () =>
-      ready && db
+      ready && activeUserId && db
         ? (await db.sessions.where('user_id').equals(activeUserId).toArray()).sort(
             (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
           )
@@ -300,7 +334,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const verificationEvents = useLiveQuery(
     async () =>
-      ready && db
+      ready && activeUserId && db
         ? (await db.verificationEvents.where('user_id').equals(activeUserId).toArray()).sort(
             (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
           )
@@ -311,7 +345,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const tbrItems = useLiveQuery(
     async () =>
-      ready && db
+      ready && activeUserId && db
         ? (await db.tbrItems.where('user_id').equals(activeUserId).toArray()).sort(
             (a, b) => a.priority - b.priority
           )
@@ -322,7 +356,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const dailyAggregates = useLiveQuery(
     async () =>
-      ready && db
+      ready && activeUserId && db
         ? (await db.dailyAggregates.where('user_id').equals(activeUserId).toArray()).sort((a, b) =>
             a.date.localeCompare(b.date)
           )
@@ -331,19 +365,15 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const liveWatchRooms = useLiveQuery(
-    async () => (ready && db ? await db.liveWatchSessions.toArray() : []),
-    [ready],
-    []
-  );
-
   const activeDraft = useLiveQuery(
     async () => {
-      if (!ready || !db) return null;
+      if (!ready || !activeUserId || !db) return null;
       const drafts = await db.sessionDrafts.where('user_id').equals(activeUserId).toArray();
-      return drafts.sort(
-        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-      )[0] ?? null;
+      return (
+        drafts.sort(
+          (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+        )[0] ?? null
+      );
     },
     [ready, activeUserId],
     null
@@ -351,12 +381,35 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const pendingSyncCount = useLiveQuery(
     async () =>
-      ready && db ? await db.syncQueue.where('user_id').equals(activeUserId).count() : 0,
+      ready && activeUserId && db
+        ? await db.syncQueue.where('user_id').equals(activeUserId).count()
+        : 0,
     [ready, activeUserId],
     0
   );
 
-  // Apply Dark/Light theme preference to documentElement
+  const refreshChallenges = useCallback(async () => {
+    if (!activeUserId || !isOnline) return;
+    try {
+      const res = await fetch('/api/challenges');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.challenges)) setChallenges(data.challenges);
+      }
+    } catch {
+      // Offline safe
+    }
+  }, [activeUserId, isOnline]);
+
+  useEffect(() => {
+    if (activeUserId && isOnline) {
+      refreshChallenges();
+    } else if (!activeUserId) {
+      setChallenges([]);
+    }
+  }, [activeUserId, isOnline, refreshChallenges]);
+
+  // Theme preference
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const pref = user?.settings_json.themePreference ?? 'system';
@@ -372,7 +425,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     return () => mediaDark.removeEventListener('change', applyTheme);
   }, [user?.settings_json.themePreference]);
 
-  // Separate In-App Foreground Time Tracking (never conflated with reading session verified minutes)
+  // Separate In-App Foreground Usage Timer
   useEffect(() => {
     if (!ready || !activeUserId || typeof document === 'undefined') return;
     const interval = window.setInterval(() => {
@@ -383,29 +436,27 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearInterval(interval);
   }, [ready, activeUserId]);
 
-  // Auto-flush offline queue when connectivity returns
+  // Auto-flush offline queue
   useEffect(() => {
-    if (!ready || !isOnline || pendingSyncCount === 0) return;
-    flushSyncQueue(activeUserId, simulateOffline).catch(() => {});
-  }, [ready, isOnline, pendingSyncCount, activeUserId, simulateOffline]);
+    if (!ready || !activeUserId || !isOnline || pendingSyncCount === 0) return;
+    flushSyncQueue(activeUserId).catch(() => {});
+  }, [ready, activeUserId, isOnline, pendingSyncCount]);
 
   const triggerManualSync = useCallback(async () => {
-    await flushSyncQueue(activeUserId, simulateOffline);
-  }, [activeUserId, simulateOffline]);
+    if (!activeUserId) return;
+    await flushSyncQueue(activeUserId);
+  }, [activeUserId]);
 
-  // Interaction Profile computation: honors user override or branches via (pointer: coarse) / standalone PWA
-  const interactionProfile: InteractionProfile = useMemo(() => {
-    const override = user?.settings_json.interactionProfileOverride ?? 'auto';
-    if (override === 'desktop') return 'desktop';
-    if (override === 'pwa') return 'pwa';
-    if (isStandalonePwa || isCoarsePointerDetected) return 'pwa';
-    return 'desktop';
-  }, [user?.settings_json.interactionProfileOverride, isStandalonePwa, isCoarsePointerDetected]);
+  // Strict automatic interaction profile: Installed PWA renders PWA UI; Browser renders Web UI
+  const interactionProfile: InteractionProfile = useMemo(
+    () => (isStandalonePwa ? 'pwa' : 'desktop'),
+    [isStandalonePwa]
+  );
 
-  // Global Desktop Keyboard Shortcuts: `/` search, `S` start session, `E` end session, `G then D` dashboard
+  // Desktop keyboard shortcuts
   const lastGKeyTimeRef = useRef<number>(0);
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || !activeUserId) return;
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const inEditable =
@@ -416,19 +467,14 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           target.isContentEditable);
 
       if (inEditable) {
-        if (e.key === 'Escape') {
-          target.blur();
-        }
+        if (e.key === 'Escape') target.blur();
         return;
       }
 
       if (e.key === '/') {
         e.preventDefault();
-        if (searchInputRef.current) {
-          searchInputRef.current.focus();
-        } else {
-          setActiveView('library');
-        }
+        if (searchInputRef.current) searchInputRef.current.focus();
+        else setActiveView('library');
         return;
       }
 
@@ -444,15 +490,15 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           lastGKeyTimeRef.current = 0;
           return;
         }
-        if (e.key.toLowerCase() === 'l') {
+        if (e.key.toLowerCase() === 'c') {
           e.preventDefault();
-          setActiveView('library');
+          setActiveView('challenges');
           lastGKeyTimeRef.current = 0;
           return;
         }
-        if (e.key.toLowerCase() === 't') {
+        if (e.key.toLowerCase() === 'l') {
           e.preventDefault();
-          setActiveView('tbr');
+          setActiveView('library');
           lastGKeyTimeRef.current = 0;
           return;
         }
@@ -470,21 +516,92 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [sessionModalOpen, activeDraft]);
+  }, [activeUserId, sessionModalOpen, activeDraft]);
 
-  const openSessionFlow = useCallback((bookId?: string, cureTargetSessionId?: string | null) => {
-    setSessionModalBookId(bookId ?? null);
-    setSessionModalCureTargetId(cureTargetSessionId ?? null);
-    setSessionModalOpen(true);
+  const registerAccount = useCallback(
+    async (params: {
+      email: string;
+      username: string;
+      displayName: string;
+      password: string;
+      goalType: ReadingGoalType;
+      goalTarget: number;
+      preferredGenres: BookGenre[];
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const tz =
+          typeof Intl !== 'undefined'
+            ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+            : 'UTC';
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...params, timezone: tz }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Registration failed' };
+
+        await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
+        window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
+        setActiveUserId(data.user.id);
+        setActiveView('dashboard');
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while creating account.' };
+      }
+    },
+    []
+  );
+
+  const signInAccount = useCallback(
+    async (params: {
+      identifier: string;
+      password: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Invalid credentials' };
+
+        await hydrateUserSnapshotIntoDexie(data.user, data.snapshot);
+        window.localStorage.setItem('booklit_last_auth_uid', data.user.id);
+        setActiveUserId(data.user.id);
+        setActiveView('dashboard');
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error while signing in.' };
+      }
+    },
+    []
+  );
+
+  const signOutAccount = useCallback(async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('booklit_last_auth_uid');
+    }
+    setActiveUserId(null);
+    setChallenges([]);
   }, []);
+
+  const openSessionFlow = useCallback(
+    (bookId?: string, cureTargetSessionId?: string | null, challengeId?: string | null) => {
+      setSessionModalBookId(bookId ?? null);
+      setSessionModalCureTargetId(cureTargetSessionId ?? null);
+      setSessionModalChallengeId(challengeId ?? null);
+      setSessionModalOpen(true);
+    },
+    []
+  );
 
   const closeSessionFlow = useCallback(() => {
     setSessionModalOpen(false);
     setSessionModalCureTargetId(null);
-  }, []);
-
-  const clearLastCompletedSession = useCallback(() => {
-    setLastCompletedSession(null);
+    setSessionModalChallengeId(null);
   }, []);
 
   const updateProfile = useCallback(
@@ -504,9 +621,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       };
       await db.users.put(updated);
       await enqueueSyncItem(user.id, 'profile', 'upsert', updated);
-      if (isOnline) await flushSyncQueue(user.id, simulateOffline);
+      if (isOnline) await flushSyncQueue(user.id);
     },
-    [user, isOnline, simulateOffline]
+    [user, isOnline]
   );
 
   const dismissFirstSessionNotificationBanner = useCallback(async () => {
@@ -515,68 +632,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       settingsPatch: { notificationsPromptedAfterFirstSession: true },
     });
   }, [updateProfile]);
-
-  const signInOrCreateAccount = useCallback(
-    async (params: {
-      email: string;
-      displayName: string;
-      provider: UserProfile['auth_provider'];
-      goalType?: UserProfile['reading_goal_type'];
-      goalTarget?: number;
-      preferredGenres?: BookGenre[];
-    }) => {
-      const cleanEmail = params.email.trim().toLowerCase();
-      const existing = await db.users.where('email').equals(cleanEmail).first();
-      if (existing) {
-        window.localStorage.setItem('booklit_active_user_id', existing.id);
-        setActiveUserId(existing.id);
-        return;
-      }
-
-      const seededTemplate = buildSeedData(new Date()).user;
-      const newId = `reader-${Date.now().toString(36)}`;
-      const freshUser: UserProfile = {
-        ...seededTemplate,
-        id: newId,
-        email: cleanEmail,
-        display_name: params.displayName.trim() || cleanEmail.split('@')[0],
-        auth_provider: params.provider,
-        created_at: new Date().toISOString(),
-        reading_goal_type: params.goalType ?? 'minutes_day',
-        reading_goal_target: params.goalTarget ?? 30,
-        preferred_genres: params.preferredGenres ?? ['literary_fiction', 'general_nonfiction'],
-        strike_count: 0,
-        streak_count: 0,
-        last_verified_session_at: null,
-      };
-
-      await db.users.put(freshUser);
-      await enqueueSyncItem(newId, 'profile', 'upsert', freshUser);
-      window.localStorage.setItem('booklit_active_user_id', newId);
-      setActiveUserId(newId);
-    },
-    []
-  );
-
-  const switchActiveUser = useCallback(async (userId: string) => {
-    window.localStorage.setItem('booklit_active_user_id', userId);
-    setActiveUserId(userId);
-  }, []);
-
-  const resetDemoWorkspace = useCallback(async () => {
-    await db.delete();
-    await db.open();
-    const seeded = buildSeedData(new Date());
-    await db.users.put(seeded.user);
-    await db.books.bulkPut(seeded.books);
-    await db.sessions.bulkPut(seeded.sessions);
-    await db.verificationEvents.bulkPut(seeded.verificationEvents);
-    await db.tbrItems.bulkPut(seeded.tbrItems);
-    await db.dailyAggregates.bulkPut(seeded.dailyAggregates);
-    await db.liveWatchSessions.bulkPut(seeded.liveWatchSessions);
-    window.localStorage.setItem('booklit_active_user_id', seeded.user.id);
-    setActiveUserId(seeded.user.id);
-  }, []);
 
   const addBook = useCallback(
     async (input: {
@@ -594,6 +649,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       status?: Book['status'];
       sample_passages?: Book['sample_passages'];
     }): Promise<Book> => {
+      if (!activeUserId) throw new Error('Sign in required');
       const primaryGenre = input.genre[0] ?? 'general_nonfiction';
       const wordsDefault =
         input.page_count * (GENRE_META[primaryGenre]?.wordsPerPageDefault ?? 280);
@@ -624,14 +680,15 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
       await db.books.put(newBook);
       await enqueueSyncItem(activeUserId, 'book', 'upsert', newBook);
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
       return newBook;
     },
-    [activeUserId, isOnline, simulateOffline]
+    [activeUserId, isOnline]
   );
 
   const updateBook = useCallback(
     async (bookId: string, patch: Partial<Book>) => {
+      if (!activeUserId) return;
       const existing = await db.books.get(bookId);
       if (!existing) return;
       const updated: Book = {
@@ -641,9 +698,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       };
       await db.books.put(updated);
       await enqueueSyncItem(activeUserId, 'book', 'upsert', updated);
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, isOnline, simulateOffline]
+    [activeUserId, isOnline]
   );
 
   const startSessionDraft = useCallback(
@@ -653,10 +710,15 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       startPage: number;
       startWordsOnPage?: number;
       startScanConfidence?: number;
+      startFrameSignature?: string | null;
+      startScannedLive?: boolean;
+      startExtractedSnippet?: string;
       isCureAttemptFor?: string | null;
       liveWatchRoomId?: string | null;
+      challengeId?: string | null;
       randomCheckScheduled: boolean;
     }): Promise<SessionDraft> => {
+      if (!activeUserId) throw new Error('Sign in required');
       const nowIso = new Date().toISOString();
       const draft: SessionDraft = {
         id: `draft-${Date.now()}`,
@@ -668,17 +730,20 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         start_page: params.startPage,
         start_words_on_page: params.startWordsOnPage,
         start_scan_confidence: params.startScanConfidence,
+        start_frame_signature: params.startFrameSignature ?? null,
+        start_scanned_live: Boolean(params.startScannedLive),
+        start_extracted_snippet: params.startExtractedSnippet,
         background_seconds: 0,
         focus_transitions: 0,
         is_cure_attempt_for: params.isCureAttemptFor ?? null,
         live_watch_room_id: params.liveWatchRoomId ?? null,
+        challenge_id: params.challengeId ?? null,
         random_check_scheduled: params.randomCheckScheduled,
         random_check_completed: false,
         voice_check_result: null,
         comprehension_result: null,
         updated_at: nowIso,
       };
-      // Clear older drafts for this user and store new draft offline-first in IndexedDB
       await db.sessionDrafts.where('user_id').equals(activeUserId).delete();
       await db.sessionDrafts.put(draft);
       return draft;
@@ -686,18 +751,15 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     [activeUserId]
   );
 
-  const updateSessionDraft = useCallback(
-    async (draftId: string, patch: Partial<SessionDraft>) => {
-      const existing = await db.sessionDrafts.get(draftId);
-      if (!existing) return;
-      await db.sessionDrafts.put({
-        ...existing,
-        ...patch,
-        updated_at: new Date().toISOString(),
-      });
-    },
-    []
-  );
+  const updateSessionDraft = useCallback(async (draftId: string, patch: Partial<SessionDraft>) => {
+    const existing = await db.sessionDrafts.get(draftId);
+    if (!existing) return;
+    await db.sessionDrafts.put({
+      ...existing,
+      ...patch,
+      updated_at: new Date().toISOString(),
+    });
+  }, []);
 
   const discardSessionDraft = useCallback(async (draftId: string) => {
     await db.sessionDrafts.delete(draftId);
@@ -705,26 +767,17 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const completeReadingSession = useCallback(
     async (payload: CompleteSessionPayload): Promise<ReadingSession> => {
+      if (!activeUserId || !user) throw new Error('Sign in required');
       const { draft } = payload;
       const book = await db.books.get(draft.book_id);
-      if (!book || !user) {
-        throw new Error('Book or user missing');
-      }
+      if (!book) throw new Error('Book missing');
 
       const endedAt = new Date();
-      let startedAtIso = draft.started_at;
-      let monotonicSeconds: number | undefined =
+      const startedAtIso = draft.started_at;
+      const monotonicSeconds =
         typeof performance !== 'undefined'
           ? Math.max(1, (performance.now() - draft.monotonic_start_ms) / 1000)
           : undefined;
-
-      if (payload.overrideElapsedMinutes && payload.overrideElapsedMinutes > 0) {
-        startedAtIso = new Date(
-          endedAt.getTime() - payload.overrideElapsedMinutes * 60000
-        ).toISOString();
-        // When user logs or simulates elapsed minutes explicitly, align monotonic reference unless testing clock anomaly
-        monotonicSeconds = payload.overrideElapsedMinutes * 60;
-      }
 
       const booksById = new Map(books.map((b) => [b.id, b]));
       const verifiedHistory = sessions.filter((s) => s.verified && !s.strike_issued);
@@ -762,6 +815,11 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         startScanConfidence: draft.start_scan_confidence,
         endScanConfidence: payload.endScanConfidence,
         hasTier1ScanOrImport: payload.hasTier1ScanOrImport,
+        liveCameraStart: draft.start_scanned_live,
+        liveCameraEnd: payload.endScannedLive,
+        startFrameSignature: draft.start_frame_signature,
+        endFrameSignature: payload.endFrameSignature,
+        strictChallengeMode: payload.strictChallengeMode,
         backgroundSeconds: draft.background_seconds,
         focusTransitions: draft.focus_transitions,
         voiceCheck: draft.voice_check_result ?? null,
@@ -772,7 +830,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
       const sessionId = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-      // Check 7-Day Strike Cure Mechanic!
       let curedTargetSession: ReadingSession | null = null;
       if (draft.is_cure_attempt_for) {
         const explicitTarget = sessions.find((s) => s.id === draft.is_cure_attempt_for);
@@ -799,6 +856,8 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
+      const liveBoth = Boolean(draft.start_scanned_live && payload.endScannedLive);
+
       const newSession: ReadingSession = {
         id: sessionId,
         user_id: activeUserId,
@@ -809,6 +868,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         start_page: draft.start_page,
         end_page: payload.endPage,
         verified: scoring.verified,
+        live_camera_verified: liveBoth,
+        challenge_eligible: scoring.challengeEligible,
+        challenge_id: draft.challenge_id ?? null,
         verification_tier: scoring.verificationTier,
         trust_score: scoring.trustScore,
         predicted_minutes: scoring.predictedMinutes,
@@ -835,7 +897,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           confidence: draft.start_scan_confidence ?? 0.88,
           metadata_json: {
             page: draft.start_page,
-            wordsEstimated: draft.start_words_on_page ?? 275,
+            liveCamera: Boolean(draft.start_scanned_live),
           },
           created_at: startedAtIso,
         });
@@ -848,7 +910,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           confidence: payload.endScanConfidence ?? 0.88,
           metadata_json: {
             page: payload.endPage,
-            wordsEstimated: payload.endWordsOnPage ?? 275,
+            liveCamera: Boolean(payload.endScannedLive),
           },
           created_at: endedAt.toISOString(),
         });
@@ -866,7 +928,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
             matchedRatio: draft.voice_check_result.matchedRatio,
             wps: draft.voice_check_result.wps,
             whisperMode: draft.voice_check_result.whisperMode,
-            audioRetained: user.settings_json.retainAudioForDebug,
+            rmsVoiceDetected: draft.voice_check_result.rmsVoiceDetected,
           },
           created_at: endedAt.toISOString(),
         });
@@ -880,34 +942,14 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
           type: 'comprehension_check',
           result: draft.comprehension_result.result,
           confidence: draft.comprehension_result.confidence,
-          metadata_json: {
-            explanation: draft.comprehension_result.explanation,
-          },
+          metadata_json: {},
           created_at: endedAt.toISOString(),
         });
       }
 
-      if (draft.focus_transitions > 0) {
-        createdEvents.push({
-          id: `ve-f-${Date.now()}-5`,
-          user_id: activeUserId,
-          session_id: sessionId,
-          type: 'focus_return',
-          result: 'pass',
-          confidence: 0.95,
-          metadata_json: {
-            focusTransitions: draft.focus_transitions,
-            backgroundSeconds: draft.background_seconds,
-          },
-          created_at: endedAt.toISOString(),
-        });
-      }
-
-      // Persist everything atomically in IndexedDB first (offline-first guarantee!)
       const todayStr = format(endedAt, 'yyyy-MM-dd');
       const aggId = `${activeUserId}_${todayStr}`;
       const existingAgg = await db.dailyAggregates.get(aggId);
-
       const creditedMinutes = scoring.verified
         ? scoring.actualMinutes * scoring.creditMultiplier
         : 0;
@@ -928,8 +970,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
             strike_events: existingAgg.strike_events + (scoring.strikeIssued ? 1 : 0),
             cure_events: existingAgg.cure_events + (curedTargetSession ? 1 : 0),
             streak_qualifies:
-              !scoring.strikeIssued &&
-              existingAgg.verified_minutes + creditedMinutes >= 15,
+              !scoring.strikeIssued && existingAgg.verified_minutes + creditedMinutes >= 15,
           }
         : {
             id: aggId,
@@ -945,7 +986,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
             streak_qualifies: !scoring.strikeIssued && creditedMinutes >= 15,
           };
 
-      // Update book progress
       const isNowFinished = payload.endPage >= book.page_count;
       const updatedBook: Book = {
         ...book,
@@ -955,7 +995,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         updated_at: endedAt.toISOString(),
       };
 
-      // Recompute active uncured strike count & streak
       let newStrikeCount = user.strike_count;
       if (scoring.strikeIssued) newStrikeCount += 1;
       if (curedTargetSession) newStrikeCount = Math.max(0, newStrikeCount - 1);
@@ -965,9 +1004,10 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       let newStreakCount = user.streak_count;
       if (!hadTodayQualifiedBefore && updatedAgg.streak_qualifies) {
         const yesterdayAgg = await db.dailyAggregates.get(`${activeUserId}_${yesterdayStr}`);
-        newStreakCount = yesterdayAgg?.streak_qualifies ? user.streak_count + 1 : Math.max(1, user.streak_count);
+        newStreakCount = yesterdayAgg?.streak_qualifies
+          ? user.streak_count + 1
+          : Math.max(1, user.streak_count);
       } else if (scoring.strikeIssued && newStreakCount > 0) {
-        // Strike reduces streak credit for the day without erasing historical verified minutes
         newStreakCount = Math.max(0, user.streak_count - 1);
       } else if (curedTargetSession) {
         newStreakCount = user.streak_count + 1;
@@ -1011,7 +1051,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
         }
       );
 
-      // Enqueue for background sync
       await enqueueSyncItem(activeUserId, 'session', 'upsert', newSession);
       await enqueueSyncItem(activeUserId, 'book', 'upsert', updatedBook);
       await enqueueSyncItem(activeUserId, 'daily_aggregate', 'upsert', updatedAgg);
@@ -1021,38 +1060,83 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (isOnline) {
-        await flushSyncQueue(activeUserId, simulateOffline);
-      }
+        await flushSyncQueue(activeUserId);
 
-      // If session was part of a Live Watch room, broadcast aggregate verified minutes only
-      if (draft.live_watch_room_id && scoring.verified && isOnline) {
-        const lwRoom = await db.liveWatchSessions.get(draft.live_watch_room_id);
-        if (lwRoom) {
-          fetch('/api/live-watch', {
+        // Credit joined Challenges if session passed strict live anti-cheat verification!
+        if (scoring.challengeEligible && liveBoth) {
+          await fetch('/api/challenges', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              action: 'heartbeat',
-              roomCode: lwRoom.room_code,
-              userId: activeUserId,
-              displayName: user.display_name,
-              verifiedMinutesDelta: creditedMinutes,
-              status: 'reading_calmly',
+              action: 'record_verified_session',
+              challengeId: draft.challenge_id ?? undefined,
+              verifiedMinutes: creditedMinutes,
+              verifiedPages: pagesRead,
+              trustScore: scoring.trustScore,
+              liveCameraVerified: true,
+              challengeEligible: true,
             }),
           }).catch(() => {});
+          await refreshChallenges();
         }
       }
 
-      setLastCompletedSession(newSession);
-
-      // Prompt gently for reminder notifications ONLY after completing a session, never on first visit!
       if (!user.settings_json.notificationsPromptedAfterFirstSession) {
         setShowFirstSessionNotificationBanner(true);
       }
 
       return newSession;
     },
-    [activeUserId, books, isOnline, sessions, simulateOffline, user, verificationEvents]
+    [activeUserId, books, isOnline, refreshChallenges, sessions, user, verificationEvents]
+  );
+
+  const createChallenge = useCallback(
+    async (params: {
+      title: string;
+      description: string;
+      metric: 'verified_minutes' | 'verified_pages';
+      targetValue: number;
+      durationDays: number;
+      visibility: 'public' | 'private';
+      strictVerification: boolean;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/challenges', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'create', ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Unable to create challenge' };
+        await refreshChallenges();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error' };
+      }
+    },
+    [refreshChallenges]
+  );
+
+  const joinChallenge = useCallback(
+    async (params: {
+      challengeId?: string;
+      inviteCode?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch('/api/challenges', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'join', ...params }),
+        });
+        const data = await res.json();
+        if (!res.ok) return { ok: false, error: data.error || 'Challenge not found' };
+        await refreshChallenges();
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Network error' };
+      }
+    },
+    [refreshChallenges]
   );
 
   const addTbrItem = useCallback(
@@ -1065,6 +1149,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       reminderEnabled?: boolean;
       notes?: string;
     }) => {
+      if (!activeUserId) return;
       const maxPrio = tbrItems.reduce((m, item) => Math.max(m, item.priority), 0);
       const item: TBRItem = {
         id: `tbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1082,43 +1167,44 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       };
       await db.tbrItems.put(item);
       await enqueueSyncItem(activeUserId, 'tbr', 'upsert', item);
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, isOnline, simulateOffline, tbrItems]
+    [activeUserId, isOnline, tbrItems]
   );
 
   const reorderTbrItems = useCallback(
     async (orderedIds: string[]) => {
+      if (!activeUserId) return;
       const updates: TBRItem[] = [];
       orderedIds.forEach((id, idx) => {
         const found = tbrItems.find((t) => t.id === id);
-        if (found) {
-          updates.push({ ...found, priority: idx + 1 });
-        }
+        if (found) updates.push({ ...found, priority: idx + 1 });
       });
       await db.tbrItems.bulkPut(updates);
       for (const u of updates) {
         await enqueueSyncItem(activeUserId, 'tbr', 'upsert', u);
       }
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, isOnline, simulateOffline, tbrItems]
+    [activeUserId, isOnline, tbrItems]
   );
 
   const updateTbrItem = useCallback(
     async (id: string, patch: Partial<TBRItem>) => {
+      if (!activeUserId) return;
       const existing = await db.tbrItems.get(id);
       if (!existing) return;
       const updated = { ...existing, ...patch };
       await db.tbrItems.put(updated);
       await enqueueSyncItem(activeUserId, 'tbr', 'upsert', updated);
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, isOnline, simulateOffline]
+    [activeUserId, isOnline]
   );
 
   const promoteTbrToReading = useCallback(
     async (tbrId: string) => {
+      if (!activeUserId) return;
       const item = await db.tbrItems.get(tbrId);
       if (!item) return;
 
@@ -1139,26 +1225,25 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       const completed = { ...item, completed_at: new Date().toISOString() };
       await db.tbrItems.put(completed);
       await enqueueSyncItem(activeUserId, 'tbr', 'upsert', completed);
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, addBook, isOnline, simulateOffline, updateBook]
+    [activeUserId, addBook, isOnline, updateBook]
   );
 
   const deleteTbrItem = useCallback(
     async (id: string) => {
+      if (!activeUserId) return;
       await db.tbrItems.delete(id);
       await enqueueSyncItem(activeUserId, 'tbr', 'delete', { id });
-      if (isOnline) await flushSyncQueue(activeUserId, simulateOffline);
+      if (isOnline) await flushSyncQueue(activeUserId);
     },
-    [activeUserId, isOnline, simulateOffline]
+    [activeUserId, isOnline]
   );
 
   const applyStreakInsurance = useCallback(async (): Promise<boolean> => {
-    if (!user) return false;
+    if (!user || !activeUserId) return false;
     const currentMonth = format(new Date(), 'yyyy-MM');
-    if (user.settings_json.streakInsuranceLastUsedMonth === currentMonth) {
-      return false;
-    }
+    if (user.settings_json.streakInsuranceLastUsedMonth === currentMonth) return false;
 
     const todayStr = format(new Date(), 'yyyy-MM-dd');
     const aggId = `${activeUserId}_${todayStr}`;
@@ -1190,6 +1275,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
   const exportUserData = useCallback(
     async (formatType: 'json' | 'csv') => {
+      if (!activeUserId) return;
       const content =
         formatType === 'json'
           ? await exportAllUserDataJson(activeUserId)
@@ -1200,7 +1286,7 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `booklit-reading-data-${format(new Date(), 'yyyy-MM-dd')}.${formatType}`;
+      a.download = `booklit-data-${format(new Date(), 'yyyy-MM-dd')}.${formatType}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1210,42 +1296,32 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
   );
 
   const deleteAccount = useCallback(async () => {
+    if (!activeUserId) return;
     await deleteUserAccountData(activeUserId);
-    const remaining = await db.users.toArray();
-    if (remaining.length > 0) {
-      window.localStorage.setItem('booklit_active_user_id', remaining[0].id);
-      setActiveUserId(remaining[0].id);
-    } else {
-      // Create clean anonymous guest profile so app remains usable immediately
-      await signInOrCreateAccount({
-        email: 'guest@local.booklit',
-        displayName: 'New Reader',
-        provider: 'guest_local',
-      });
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('booklit_last_auth_uid');
     }
-  }, [activeUserId, signInOrCreateAccount]);
+    setActiveUserId(null);
+    setChallenges([]);
+  }, [activeUserId]);
 
   const value: BooklitContextValue = {
     ready,
     user,
-    allUsers,
     books,
     sessions,
     verificationEvents,
     tbrItems,
     dailyAggregates,
-    liveWatchRooms,
+    challenges,
     activeDraft,
     pendingSyncCount,
     isOnline,
-    simulateOffline,
-    setSimulateOffline,
     triggerManualSync,
 
     activeView,
     setActiveView,
     interactionProfile,
-    isCoarsePointerDetected,
     isStandalonePwa,
     globalSearchQuery,
     setGlobalSearchQuery,
@@ -1254,10 +1330,9 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     sessionModalOpen,
     sessionModalBookId,
     sessionModalCureTargetId,
+    sessionModalChallengeId,
     openSessionFlow,
     closeSessionFlow,
-    lastCompletedSession,
-    clearLastCompletedSession,
     showFirstSessionNotificationBanner,
     dismissFirstSessionNotificationBanner,
 
@@ -1265,24 +1340,29 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
     setSelectedBookId,
     addBookModalOpen,
     setAddBookModalOpen,
-    authModalOpen,
-    setAuthModalOpen,
+
+    registerAccount,
+    signInAccount,
+    signOutAccount,
 
     updateProfile,
-    signInOrCreateAccount,
-    switchActiveUser,
-    resetDemoWorkspace,
     addBook,
     updateBook,
     startSessionDraft,
     updateSessionDraft,
     discardSessionDraft,
     completeReadingSession,
+
+    refreshChallenges,
+    createChallenge,
+    joinChallenge,
+
     addTbrItem,
     reorderTbrItems,
     updateTbrItem,
     promoteTbrToReading,
     deleteTbrItem,
+
     applyStreakInsurance,
     exportUserData,
     deleteAccount,
@@ -1293,8 +1373,6 @@ export function BooklitProvider({ children }: { children: React.ReactNode }) {
 
 export function useBooklit() {
   const ctx = useContext(BooklitContext);
-  if (!ctx) {
-    throw new Error('useBooklit must be used inside BooklitProvider');
-  }
+  if (!ctx) throw new Error('useBooklit must be used inside BooklitProvider');
   return ctx;
 }

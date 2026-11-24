@@ -3,7 +3,6 @@ import { format } from 'date-fns';
 import {
   Book,
   DailyAggregate,
-  LiveWatchSession,
   ReadingSession,
   SessionDraft,
   SyncQueueItem,
@@ -11,7 +10,6 @@ import {
   UserProfile,
   VerificationEvent,
 } from '../types';
-import { buildSeedData, DEFAULT_USER_ID } from './seed';
 
 export class BooklitDexie extends Dexie {
   users!: Table<UserProfile, string>;
@@ -20,78 +18,59 @@ export class BooklitDexie extends Dexie {
   verificationEvents!: Table<VerificationEvent, string>;
   tbrItems!: Table<TBRItem, string>;
   dailyAggregates!: Table<DailyAggregate, string>;
-  liveWatchSessions!: Table<LiveWatchSession, string>;
   sessionDrafts!: Table<SessionDraft, string>;
   syncQueue!: Table<SyncQueueItem, string>;
 
   constructor() {
-    super('BooklitOfflineDB_v1');
+    super('BooklitProdDB_v2');
     this.version(1).stores({
-      users: 'id, email',
+      users: 'id, email, username',
       books: 'id, user_id, status, title, author, updated_at',
       sessions: 'id, user_id, book_id, started_at, ended_at, verified, strike_issued',
       verificationEvents: 'id, user_id, session_id, type, created_at',
       tbrItems: 'id, user_id, priority, book_id',
       dailyAggregates: 'id, user_id, date',
-      liveWatchSessions: 'id, room_code, host_user_id, status',
       sessionDrafts: 'id, user_id, book_id, updated_at',
       syncQueue: 'id, user_id, entity, created_at',
     });
   }
 }
 
-export const db = typeof window !== 'undefined' ? new BooklitDexie() : (null as unknown as BooklitDexie);
+export const db =
+  typeof window !== 'undefined' ? new BooklitDexie() : (null as unknown as BooklitDexie);
 
-let seedPromise: Promise<string> | null = null;
+export async function hydrateUserSnapshotIntoDexie(
+  user: UserProfile,
+  snapshot?: {
+    books?: Record<string, Book>;
+    sessions?: Record<string, ReadingSession>;
+    verificationEvents?: Record<string, VerificationEvent>;
+    tbr?: Record<string, TBRItem>;
+    dailyAggregates?: Record<string, DailyAggregate>;
+  } | null
+): Promise<void> {
+  if (typeof window === 'undefined' || !db) return;
 
-export async function ensureDatabaseSeeded(): Promise<string> {
-  if (typeof window === 'undefined' || !db) return DEFAULT_USER_ID;
-  if (seedPromise) return seedPromise;
+  await db.transaction(
+    'rw',
+    [db.users, db.books, db.sessions, db.verificationEvents, db.tbrItems, db.dailyAggregates],
+    async () => {
+      await db.users.put(user);
+      if (!snapshot) return;
 
-  seedPromise = (async () => {
-    const activeUserId =
-      window.localStorage.getItem('booklit_active_user_id') || DEFAULT_USER_ID;
+      const books = Object.values(snapshot.books ?? {});
+      const sessions = Object.values(snapshot.sessions ?? {});
+      const events = Object.values(snapshot.verificationEvents ?? {});
+      const tbr = Object.values(snapshot.tbr ?? {});
+      const aggs = Object.values(snapshot.dailyAggregates ?? {});
 
-    const existingCount = await db.users.count();
-    if (existingCount === 0) {
-      const seeded = buildSeedData(new Date());
-      await db.transaction(
-        'rw',
-        [
-          db.users,
-          db.books,
-          db.sessions,
-          db.verificationEvents,
-          db.tbrItems,
-          db.dailyAggregates,
-          db.liveWatchSessions,
-        ],
-        async () => {
-          await db.users.put(seeded.user);
-          await db.books.bulkPut(seeded.books);
-          await db.sessions.bulkPut(seeded.sessions);
-          await db.verificationEvents.bulkPut(seeded.verificationEvents);
-          await db.tbrItems.bulkPut(seeded.tbrItems);
-          await db.dailyAggregates.bulkPut(seeded.dailyAggregates);
-          await db.liveWatchSessions.bulkPut(seeded.liveWatchSessions);
-        }
-      );
-      window.localStorage.setItem('booklit_active_user_id', seeded.user.id);
-      return seeded.user.id;
+      if (books.length > 0) await db.books.bulkPut(books);
+      if (sessions.length > 0) await db.sessions.bulkPut(sessions);
+      if (events.length > 0) await db.verificationEvents.bulkPut(events);
+      if (tbr.length > 0) await db.tbrItems.bulkPut(tbr);
+      if (aggs.length > 0) await db.dailyAggregates.bulkPut(aggs);
     }
-
-    const activeExists = await db.users.get(activeUserId);
-    if (activeExists) return activeExists.id;
-
-    const firstUser = await db.users.toCollection().first();
-    if (firstUser) {
-      window.localStorage.setItem('booklit_active_user_id', firstUser.id);
-      return firstUser.id;
-    }
-    return DEFAULT_USER_ID;
-  })();
-
-  return seedPromise;
+  );
 }
 
 export async function enqueueSyncItem(
@@ -114,13 +93,12 @@ export async function enqueueSyncItem(
 }
 
 export async function flushSyncQueue(
-  userId: string,
-  forceOfflineSimulation = false
+  userId: string
 ): Promise<{ syncedCount: number; remainingCount: number }> {
   if (!db) return { syncedCount: 0, remainingCount: 0 };
   const pending = await db.syncQueue.where('user_id').equals(userId).toArray();
 
-  if (forceOfflineSimulation || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
     return { syncedCount: 0, remainingCount: pending.length };
   }
 
@@ -132,12 +110,11 @@ export async function flushSyncQueue(
     const res = await fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, items: pending }),
+      body: JSON.stringify({ items: pending }),
     });
 
     if (res.ok) {
       await db.syncQueue.bulkDelete(pending.map((p) => p.id));
-      // Mark unsynced sessions as synced
       const unsyncedSessions = await db.sessions
         .where('user_id')
         .equals(userId)
@@ -149,15 +126,12 @@ export async function flushSyncQueue(
       return { syncedCount: pending.length, remainingCount: 0 };
     }
   } catch {
-    // Keep safely in IndexedDB queue for later retry
+    // Kept safely in IndexedDB until connectivity returns
   }
 
   return { syncedCount: 0, remainingCount: pending.length };
 }
 
-/**
- * Records active Booklit foreground app time separately from verified reading session time.
- */
 export async function recordAppForegroundSeconds(
   userId: string,
   deltaSeconds: number
@@ -171,8 +145,7 @@ export async function recordAppForegroundSeconds(
   if (existing) {
     await db.dailyAggregates.put({
       ...existing,
-      app_foreground_minutes:
-        Math.round((existing.app_foreground_minutes + deltaMin) * 100) / 100,
+      app_foreground_minutes: Math.round((existing.app_foreground_minutes + deltaMin) * 100) / 100,
     });
   } else {
     await db.dailyAggregates.put({
@@ -206,7 +179,7 @@ export async function exportAllUserDataJson(userId: string): Promise<string> {
     {
       exportedAt: new Date().toISOString(),
       platform: 'Booklit',
-      schemaVersion: '1.0',
+      schemaVersion: '2.0',
       user,
       books,
       readingSessions: sessions,
@@ -250,10 +223,10 @@ export async function exportAllUserDataCsv(userId: string): Promise<string> {
     'wpm_observed',
     'trust_score',
     'verified',
+    'challenge_eligible',
     'verification_tier',
     'strike_issued',
     'cure_session_id',
-    'flags',
   ];
 
   const rows = sessions
@@ -276,10 +249,10 @@ export async function exportAllUserDataCsv(userId: string): Promise<string> {
         s.wpm_observed,
         s.trust_score,
         s.verified,
+        Boolean(s.challenge_eligible),
         s.verification_tier,
         s.strike_issued,
         s.cure_session_id ?? '',
-        s.flags_json.map((f) => f.code).join('|'),
       ]
         .map(escapeCsv)
         .join(',');
@@ -313,13 +286,5 @@ export async function deleteUserAccountData(userId: string): Promise<void> {
     }
   );
 
-  try {
-    await fetch('/api/sync', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
-    });
-  } catch {
-    // Local deletion already complete
-  }
+  await fetch('/api/sync', { method: 'DELETE' }).catch(() => {});
 }

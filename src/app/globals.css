@@ -7,8 +7,14 @@
     color-scheme: light dark;
   }
 
+  html,
   body {
-    @apply bg-paper-50 text-stone-900 dark:bg-ink-950 dark:text-stone-100 antialiased selection:bg-emerald-700/20;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+
+  body {
+    @apply bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 antialiased selection:bg-emerald-600/20;
   }
 }
 

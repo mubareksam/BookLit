@@ -1,448 +1,446 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
-import { Barcode, BookPlus, Check, Search, Sparkles, X } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Barcode, BookPlus, Camera, Plus, Search, X } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
-import { BOOK_GENRES, BookGenre, GENRE_META, ReadingMedium } from '@/lib/types';
-import { CATALOG_BOOKS, CatalogBookSeed, searchCatalog } from '@/lib/domain/catalog';
+import { CatalogBookSeed } from '@/lib/domain/catalog';
+import { Book, BookGenre, GENRE_META, ReadingMedium } from '@/lib/types';
 
 export function AddBookModal() {
-  const { addBookModalOpen, setAddBookModalOpen, addBook, addTbrItem } = useBooklit();
+  const { addBookModalOpen, setAddBookModalOpen, addBook, addTbrItem, books } = useBooklit();
+  const [tab, setTab] = useState<'search' | 'barcode' | 'manual'>('search');
 
-  const [tab, setTab] = useState<'catalog' | 'barcode' | 'manual'>('catalog');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [barcodeInput, setBarcodeInput] = useState('');
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<CatalogBookSeed[]>([]);
+  const [searching, setSearching] = useState(false);
 
-  // Manual form
+  const [isbnInput, setIsbnInput] = useState('');
+  const [barcodeCameraOpen, setBarcodeCameraOpen] = useState(false);
+  const [barcodeMsg, setBarcodeMsg] = useState('');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
-  const [isbn, setIsbn] = useState('');
-  const [selectedGenres, setSelectedGenres] = useState<BookGenre[]>(['general_nonfiction']);
-  const [pageCount, setPageCount] = useState<number>(280);
-  const [wordCountEst, setWordCountEst] = useState<string>('');
-  const [difficulty, setDifficulty] = useState<1 | 2 | 3 | 4 | 5>(3);
+  const [pageCount, setPageCount] = useState(300);
+  const [genre, setGenre] = useState<BookGenre>('literary_fiction');
+  const [status, setStatus] = useState<Book['status']>('reading');
   const [medium, setMedium] = useState<ReadingMedium>('physical');
-  const [destination, setDestination] = useState<'reading' | 'tbr'>('reading');
-  const [description, setDescription] = useState('');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  const catalogMatches = useMemo(() => searchCatalog(searchQuery), [searchQuery]);
-  const barcodeMatch = useMemo(() => {
-    const clean = barcodeInput.replace(/[^0-9x]/gi, '');
-    if (clean.length < 4) return null;
-    return CATALOG_BOOKS.find((c) => c.isbn.includes(clean)) ?? null;
-  }, [barcodeInput]);
 
   if (!addBookModalOpen) return null;
 
-  const handleQuickAddSeed = async (seed: CatalogBookSeed, target: 'reading' | 'tbr') => {
-    const created = await addBook({
-      title: seed.title,
-      author: seed.author,
-      isbn: seed.isbn,
-      genre: seed.genre,
-      subgenre: seed.subgenre,
-      page_count: seed.page_count,
-      word_count_estimate: seed.word_count_estimate,
-      difficulty_band: seed.difficulty_band,
-      medium_default: 'physical',
-      description: seed.description,
-      source: seed.source,
-      status: target,
-      sample_passages: seed.sample_passages,
-    });
-    if (target === 'tbr') {
-      await addTbrItem({
-        bookId: created.id,
-        notes: `Added from ${seed.source}`,
-      });
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
+    setBarcodeCameraOpen(false);
+  };
+
+  const closeModal = () => {
+    stopCamera();
     setAddBookModalOpen(false);
   };
 
-  const toggleGenre = (g: BookGenre) => {
-    setSelectedGenres((prev) => {
-      if (prev.includes(g)) {
-        return prev.length > 1 ? prev.filter((item) => item !== g) : prev;
+  const runSearch = async (q: string) => {
+    setQuery(q);
+    if (!q.trim()) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const res = await fetch(`/api/books/search?q=${encodeURIComponent(q.trim())}`);
+      if (res.ok) {
+        const data = await res.json();
+        setResults(data.results ?? []);
       }
-      const next = [...prev, g];
-      setDifficulty(GENRE_META[next[0]].defaultDifficulty);
-      return next;
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const lookupIsbn = async (isbn: string) => {
+    const clean = isbn.replace(/[^0-9Xx]/g, '');
+    if (clean.length < 10) {
+      setBarcodeMsg('Enter a valid 10- or 13-digit ISBN.');
+      return;
+    }
+    setBarcodeMsg('Searching ISBN…');
+    const res = await fetch(`/api/books/search?q=${encodeURIComponent(clean)}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.results && data.results.length > 0) {
+        setResults(data.results);
+        stopCamera();
+        setTab('search');
+        setBarcodeMsg('');
+        return;
+      }
+    }
+    setBarcodeMsg(`No match found for ${clean}—use Manual Entry.`);
+  };
+
+  const startLiveBarcodeScan = async () => {
+    setBarcodeMsg('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+      });
+      streamRef.current = stream;
+      setBarcodeCameraOpen(true);
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      }, 80);
+
+      const BarcodeDetectorCtor = (
+        window as unknown as {
+          BarcodeDetector?: new (opts: { formats: string[] }) => {
+            detect: (el: HTMLVideoElement) => Promise<Array<{ rawValue: string }>>;
+          };
+        }
+      ).BarcodeDetector;
+
+      if (BarcodeDetectorCtor) {
+        const detector = new BarcodeDetectorCtor({ formats: ['ean_13', 'ean_8'] });
+        const poll = window.setInterval(async () => {
+          if (!videoRef.current || !streamRef.current) {
+            window.clearInterval(poll);
+            return;
+          }
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes.length > 0 && codes[0].rawValue) {
+              window.clearInterval(poll);
+              setIsbnInput(codes[0].rawValue);
+              await lookupIsbn(codes[0].rawValue);
+            }
+          } catch {}
+        }, 500);
+      } else {
+        setBarcodeMsg('Type the ISBN printed above the barcode if auto-scan is unavailable.');
+      }
+    } catch {
+      setBarcodeMsg('Camera permission denied—enter ISBN manually below.');
+    }
+  };
+
+  const handleAddSeed = async (item: CatalogBookSeed, targetStatus: 'reading' | 'tbr') => {
+    const created = await addBook({
+      title: item.title,
+      author: item.author,
+      isbn: item.isbn || null,
+      genre: item.genre,
+      subgenre: item.subgenre,
+      page_count: item.page_count,
+      word_count_estimate: item.word_count_estimate,
+      difficulty_band: item.difficulty_band,
+      medium_default: 'physical',
+      description: item.description,
+      source: item.source,
+      status: targetStatus,
+      sample_passages: item.sample_passages,
     });
+    if (targetStatus === 'tbr') {
+      await addTbrItem({ bookId: created.id });
+    }
+    closeModal();
   };
 
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) {
-      setErrorMsg('Title is required.');
-      return;
-    }
-    if (selectedGenres.length === 0) {
-      setErrorMsg('Select at least one genre.');
-      return;
-    }
+    if (!title.trim() || !author.trim()) return;
+    const pages = Math.max(20, pageCount);
     const created = await addBook({
-      title,
-      author,
-      isbn: isbn || null,
-      genre: selectedGenres,
-      page_count: Math.max(5, Number(pageCount) || 250),
-      word_count_estimate: wordCountEst ? Number(wordCountEst) : undefined,
-      difficulty_band: difficulty,
+      title: title.trim(),
+      author: author.trim(),
+      page_count: pages,
+      word_count_estimate: pages * 280,
+      genre: [genre],
+      difficulty_band: 3,
+      description: '',
+      status,
       medium_default: medium,
-      description,
-      source: 'manual',
-      status: destination,
     });
-    if (destination === 'tbr') {
+    if (status === 'tbr') {
       await addTbrItem({ bookId: created.id });
     }
-    setAddBookModalOpen(false);
+    setTitle('');
+    setAuthor('');
+    closeModal();
   };
 
+  const existingTitles = new Set(books.map((b) => b.title.toLowerCase()));
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full max-w-2xl bg-paper-50 dark:bg-ink-900 rounded-t-3xl sm:rounded-2xl border border-stone-200 dark:border-stone-800 shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
-        <div className="px-5 py-4 border-b border-stone-200 dark:border-stone-800 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <BookPlus className="w-4 h-4 text-emerald-700 dark:text-emerald-300" />
-            <h2 className="text-sm font-semibold text-stone-900 dark:text-stone-100">
-              Add Book (Catalog Search · ISBN Barcode · Manual)
-            </h2>
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl max-h-[88vh] flex flex-col overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <BookPlus className="w-4 h-4 text-emerald-600" />
+            <h2 className="text-sm font-semibold">Add Book</h2>
           </div>
           <button
-            onClick={() => setAddBookModalOpen(false)}
-            aria-label="Close add book modal"
-            className="p-1.5 rounded-lg text-stone-500 hover:bg-stone-200/70 dark:hover:bg-ink-800"
+            onClick={closeModal}
+            className="p-1.5 rounded-xl text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Mode Tabs */}
-        <div className="px-5 pt-3 flex gap-2 border-b border-stone-200 dark:border-stone-800 pb-3">
-          {[
-            { id: 'catalog', label: 'Search Catalog', icon: Search },
-            { id: 'barcode', label: 'Scan ISBN Barcode', icon: Barcode },
-            { id: 'manual', label: 'Manual Entry', icon: BookPlus },
-          ].map((t) => {
-            const Icon = t.icon;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setTab(t.id as typeof tab)}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition ${
-                  tab === t.id
-                    ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900'
-                    : 'text-stone-600 dark:text-stone-400 hover:bg-stone-200/60 dark:hover:bg-ink-800'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                {t.label}
-              </button>
-            );
-          })}
+        <div className="px-5 pt-3">
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 p-1 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => {
+                stopCamera();
+                setTab('search');
+              }}
+              className={`py-1.5 rounded-lg ${
+                tab === 'search' ? 'bg-white dark:bg-zinc-700 shadow-sm' : 'text-zinc-500'
+              }`}
+            >
+              Search
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab('barcode')}
+              className={`py-1.5 rounded-lg ${
+                tab === 'barcode' ? 'bg-white dark:bg-zinc-700 shadow-sm' : 'text-zinc-500'
+              }`}
+            >
+              ISBN Scan
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                stopCamera();
+                setTab('manual');
+              }}
+              className={`py-1.5 rounded-lg ${
+                tab === 'manual' ? 'bg-white dark:bg-zinc-700 shadow-sm' : 'text-zinc-500'
+              }`}
+            >
+              Manual
+            </button>
+          </div>
         </div>
 
         <div className="p-5 overflow-y-auto space-y-4">
-          {tab === 'catalog' && (
+          {tab === 'search' && (
             <div className="space-y-3">
               <div className="relative">
-                <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-2.5" />
+                <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-3" />
                 <input
                   type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search OpenLibrary / Google Books seed by title, author, genre, or ISBN…"
-                  className="w-full pl-9 pr-4 py-2 rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 text-sm"
+                  value={query}
+                  onChange={(e) => runSearch(e.target.value)}
+                  placeholder="Search title or author (e.g. Dune, Atomic Habits)…"
+                  className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs"
                 />
               </div>
 
-              <div className="space-y-2.5 max-h-[54vh] overflow-y-auto pr-1">
-                {catalogMatches.map((seed) => (
-                  <div
-                    key={seed.catalogId}
-                    className="rounded-xl border border-stone-200 dark:border-stone-800 p-3.5 bg-white/70 dark:bg-ink-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="font-serif font-semibold text-sm text-stone-900 dark:text-stone-100">
-                          {seed.title}
-                        </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-200/80 dark:bg-ink-700 font-mono">
-                          {seed.source}
-                        </span>
+              {searching && <p className="text-xs text-zinc-500">Searching catalog…</p>}
+
+              {!query.trim() && results.length === 0 && (
+                <p className="text-xs text-zinc-500 text-center py-6">
+                  Search by title, author, or ISBN to add books to your library.
+                </p>
+              )}
+
+              <div className="space-y-2">
+                {results.map((item, idx) => {
+                  const alreadyInLib = existingTitles.has(item.title.toLowerCase());
+                  return (
+                    <div
+                      key={`${item.catalogId}-${idx}`}
+                      className="flex items-center justify-between gap-3 p-3 rounded-2xl border border-zinc-200 dark:border-zinc-800 min-w-0"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className="w-9 h-12 rounded-lg shrink-0"
+                          style={{ backgroundColor: item.cover_color || '#065f46' }}
+                        />
+                        <div className="min-w-0">
+                          <h3 className="text-xs font-semibold truncate">{item.title}</h3>
+                          <p className="text-[11px] text-zinc-500 truncate">
+                            {item.author} · {item.page_count}p
+                          </p>
+                        </div>
                       </div>
-                      <p className="text-xs text-stone-600 dark:text-stone-400">
-                        {seed.author} · {seed.page_count} pages · ~
-                        {Math.round(seed.word_count_estimate / 1000)}k words · Difficulty{' '}
-                        {seed.difficulty_band}/5
-                      </p>
-                      <div className="flex flex-wrap gap-1">
-                        {seed.genre.map((g) => (
-                          <span
-                            key={g}
-                            className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${GENRE_META[g].badgeColor}`}
+
+                      {alreadyInLib ? (
+                        <span className="text-[11px] px-2.5 py-1 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-500 shrink-0">
+                          Added
+                        </span>
+                      ) : (
+                        <div className="flex gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleAddSeed(item, 'tbr')}
+                            className="px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[11px] font-medium"
                           >
-                            {GENRE_META[g].label}
-                          </span>
-                        ))}
-                      </div>
+                            + TBR
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddSeed(item, 'reading')}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold"
+                          >
+                            Read
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleQuickAddSeed(seed, 'tbr')}
-                        className="px-3 py-1.5 rounded-lg border border-stone-300 dark:border-stone-700 text-xs font-medium hover:bg-stone-100 dark:hover:bg-ink-700"
-                      >
-                        + TBR
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleQuickAddSeed(seed, 'reading')}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium"
-                      >
-                        Start Reading
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
           {tab === 'barcode' && (
-            <div className="space-y-4">
-              <div className="rounded-2xl border border-dashed border-stone-300 dark:border-stone-700 p-5 text-center space-y-3 bg-paper-100/70 dark:bg-ink-800/40">
-                <Barcode className="w-8 h-8 text-emerald-700 dark:text-emerald-300 mx-auto" />
-                <p className="text-xs text-stone-600 dark:text-stone-300 max-w-md mx-auto">
-                  Enter an ISBN-13 barcode from the back cover (or test one of the sample barcodes
-                  below) to auto-populate pages, word density, and genre difficulty.
-                </p>
-                <input
-                  type="text"
-                  value={barcodeInput}
-                  onChange={(e) => setBarcodeInput(e.target.value)}
-                  placeholder="Enter ISBN-13 (e.g. 9780312424404)…"
-                  className="max-w-xs w-full mx-auto rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-900 px-3.5 py-2 font-mono text-sm text-center"
-                />
-                <div className="flex flex-wrap justify-center gap-1.5 pt-1">
-                  {[
-                    { isbn: '9780312424404', label: 'Gilead (Literary/Religious)' },
-                    { isbn: '9780226458120', label: 'Kuhn (Academic)' },
-                    { isbn: '9780394820378', label: 'Phantom Tollbooth (Children’s)' },
-                    { isbn: '9780593135204', label: 'Project Hail Mary' },
-                  ].map((sample) => (
+            <div className="space-y-3">
+              {!barcodeCameraOpen ? (
+                <button
+                  type="button"
+                  onClick={startLiveBarcodeScan}
+                  className="w-full py-3 rounded-2xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold flex items-center justify-center gap-2"
+                >
+                  <Camera className="w-4 h-4" />
+                  Scan ISBN Barcode with Camera
+                </button>
+              ) : (
+                <div className="rounded-2xl overflow-hidden border border-zinc-300 dark:border-zinc-700 bg-black">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-48 object-cover"
+                  />
+                  <div className="p-2.5 flex justify-between items-center text-xs text-zinc-300">
+                    <span>Point at back-cover ISBN barcode</span>
                     <button
-                      key={sample.isbn}
                       type="button"
-                      onClick={() => setBarcodeInput(sample.isbn)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-700/10 text-emerald-800 dark:text-emerald-300 text-[11px] font-medium"
+                      onClick={stopCamera}
+                      className="px-2.5 py-1 rounded bg-white/10"
                     >
-                      <Sparkles className="w-3 h-3" />
-                      {sample.label}
+                      Close
                     </button>
-                  ))}
-                </div>
-              </div>
-
-              {barcodeMatch && (
-                <div className="rounded-xl border border-emerald-600/35 bg-emerald-600/10 p-4 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs font-mono text-emerald-800 dark:text-emerald-300">
-                      ISBN {barcodeMatch.isbn} Matched via {barcodeMatch.source}
-                    </div>
-                    <div className="font-serif font-semibold text-base text-stone-900 dark:text-white">
-                      {barcodeMatch.title}
-                    </div>
-                    <div className="text-xs text-stone-600 dark:text-stone-300">
-                      {barcodeMatch.author} · {barcodeMatch.page_count} pages · Difficulty{' '}
-                      {barcodeMatch.difficulty_band}/5
-                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickAddSeed(barcodeMatch, 'reading')}
-                    className="px-4 py-2 rounded-xl bg-emerald-700 text-white text-xs font-semibold shrink-0"
-                  >
-                    Add Book
-                  </button>
                 </div>
               )}
+
+              <div className="flex gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <Barcode className="w-4 h-4 text-zinc-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={isbnInput}
+                    onChange={(e) => setIsbnInput(e.target.value)}
+                    placeholder="e.g. 9780441172719"
+                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 font-mono text-xs"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => lookupIsbn(isbnInput)}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold shrink-0"
+                >
+                  Lookup
+                </button>
+              </div>
+
+              {barcodeMsg && <p className="text-xs text-zinc-500">{barcodeMsg}</p>}
             </div>
           )}
 
           {tab === 'manual' && (
-            <form onSubmit={handleManualSubmit} className="space-y-4">
-              {errorMsg && (
-                <div className="rounded-lg bg-rose-500/10 text-rose-600 px-3 py-2 text-xs">
-                  {errorMsg}
-                </div>
-              )}
+            <form onSubmit={handleManualSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-zinc-500 mb-1">Title *</label>
+                <input
+                  required
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. The Brothers Karamazov"
+                  className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs"
+                />
+              </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Title *
-                  </label>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Author *</label>
                   <input
-                    type="text"
                     required
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    placeholder="e.g. Introduction to Algorithms"
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Author (encouraged)
-                  </label>
-                  <input
-                    type="text"
                     value={author}
                     onChange={(e) => setAuthor(e.target.value)}
-                    placeholder="e.g. Cormen, Leiserson, Rivest, Stein"
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm"
+                    placeholder="e.g. Fyodor Dostoevsky"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs"
                   />
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1.5">
-                  Genres * (supports Academic, Technical, Religious, Poetry, Reference, Children’s &
-                  Fiction — sets baseline WPM priors)
-                </label>
-                <div className="flex flex-wrap gap-1.5">
-                  {BOOK_GENRES.map((g) => {
-                    const active = selectedGenres.includes(g);
-                    return (
-                      <button
-                        key={g}
-                        type="button"
-                        onClick={() => toggleGenre(g)}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition ${
-                          active
-                            ? 'border-emerald-700 bg-emerald-700 text-white'
-                            : 'border-stone-300 dark:border-stone-700 text-stone-600 dark:text-stone-300'
-                        }`}
-                      >
-                        {active && <Check className="w-3 h-3" />}
-                        {GENRE_META[g].label} (~{GENRE_META[g].priorWpm} wpm)
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Page Count *
-                  </label>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Pages *</label>
                   <input
                     type="number"
-                    min={5}
-                    max={9999}
+                    min={20}
+                    max={5000}
                     value={pageCount}
-                    onChange={(e) => setPageCount(Number(e.target.value) || 200)}
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 font-mono text-sm"
+                    onChange={(e) => setPageCount(Number(e.target.value) || 250)}
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 font-mono text-xs"
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                 <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Word Estimate (opt)
-                  </label>
-                  <input
-                    type="number"
-                    value={wordCountEst}
-                    onChange={(e) => setWordCountEst(e.target.value)}
-                    placeholder={`~${
-                      pageCount * GENRE_META[selectedGenres[0]].wordsPerPageDefault
-                    }`}
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 font-mono text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Difficulty (1–5)
-                  </label>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Genre</label>
                   <select
-                    value={difficulty}
-                    onChange={(e) =>
-                      setDifficulty(Number(e.target.value) as 1 | 2 | 3 | 4 | 5)
-                    }
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm"
+                    value={genre}
+                    onChange={(e) => setGenre(e.target.value as BookGenre)}
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-2.5 py-2 text-xs"
                   >
-                    <option value={1}>1 — Light / Accessible</option>
-                    <option value={2}>2 — Brisk Narrative</option>
-                    <option value={3}>3 — Standard</option>
-                    <option value={4}>4 — Dense / Contemplative</option>
-                    <option value={5}>5 — Technical / Academic</option>
+                    {(Object.keys(GENRE_META) as BookGenre[]).map((g) => (
+                      <option key={g} value={g}>
+                        {GENRE_META[g].label}
+                      </option>
+                    ))}
                   </select>
                 </div>
+
                 <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Medium
-                  </label>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Shelf</label>
+                  <select
+                    value={status}
+                    onChange={(e) => setStatus(e.target.value as Book['status'])}
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-2.5 py-2 text-xs"
+                  >
+                    <option value="reading">Reading</option>
+                    <option value="tbr">TBR Queue</option>
+                    <option value="finished">Finished</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Medium</label>
                   <select
                     value={medium}
                     onChange={(e) => setMedium(e.target.value as ReadingMedium)}
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-2.5 py-2 text-xs"
                   >
-                    <option value="physical">Physical Book</option>
-                    <option value="ebook">E-Book</option>
+                    <option value="physical">Physical</option>
+                    <option value="ebook">E-Reader</option>
                     <option value="audio">Audiobook</option>
                   </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    ISBN (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={isbn}
-                    onChange={(e) => setIsbn(e.target.value)}
-                    placeholder="978..."
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 font-mono text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                    Shelf Destination
-                  </label>
-                  <select
-                    value={destination}
-                    onChange={(e) => setDestination(e.target.value as 'reading' | 'tbr')}
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm"
-                  >
-                    <option value="reading">Currently Reading</option>
-                    <option value="tbr">To-Be-Read (TBR Queue)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 mb-1">
-                  Notes / Description (optional)
-                </label>
-                <textarea
-                  rows={2}
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-xs"
-                />
-              </div>
-
               <button
                 type="submit"
-                className="w-full py-3 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold"
+                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
               >
-                Save Book to Library
+                <Plus className="w-4 h-4" />
+                Save Book
               </button>
             </form>
           )}

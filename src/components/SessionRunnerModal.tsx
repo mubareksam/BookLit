@@ -7,15 +7,11 @@ import {
   Camera,
   CheckCircle2,
   Clock,
-  FastForward,
-  FileText,
   HelpCircle,
   Mic,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
-  Tablet,
-  Upload,
+  Trophy,
   VolumeX,
   WifiOff,
   X,
@@ -24,8 +20,8 @@ import { useBooklit } from '@/context/BooklitContext';
 import { GENRE_META, ReadingMedium, ReadingSession } from '@/lib/types';
 import {
   analyzePageCapture,
+  computeSignatureDistance,
   PageScanAnalysis,
-  renderSamplePageCapture,
 } from '@/lib/domain/ocrService';
 import {
   estimateUserGenreSpeed,
@@ -49,9 +45,12 @@ export function SessionRunnerModal() {
     sessionModalOpen,
     sessionModalBookId,
     sessionModalCureTargetId,
+    sessionModalChallengeId,
     closeSessionFlow,
+    setAddBookModalOpen,
     books,
     sessions,
+    challenges,
     user,
     activeDraft,
     isOnline,
@@ -63,50 +62,64 @@ export function SessionRunnerModal() {
     updateProfile,
   } = useBooklit();
 
-  const readingBooks = useMemo(
-    () => books.filter((b) => b.status === 'reading' || b.status === 'tbr'),
-    [books]
-  );
-
   const [step, setStep] = useState<FlowStep>('setup');
   const [selectedBookId, setSelectedBookId] = useState<string>('');
   const [medium, setMedium] = useState<ReadingMedium>('physical');
   const [startPage, setStartPage] = useState<number>(1);
-  const [endPage, setEndPage] = useState<number>(15);
+  const [endPage, setEndPage] = useState<number>(10);
 
-  // OCR state
+  // Live Camera Only state (NO file upload allowed!)
   const [scanTarget, setScanTarget] = useState<'start' | 'end'>('start');
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [startScanResult, setStartScanResult] = useState<PageScanAnalysis | null>(null);
   const [endScanResult, setEndScanResult] = useState<PageScanAnalysis | null>(null);
-  const [capturedPreviewUrl, setCapturedPreviewUrl] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  // E-reader share-sheet companion import state
-  const [ereaderShareText, setEreaderShareText] = useState('');
-  const [ereaderImportConfirmed, setEreaderImportConfirmed] = useState(false);
-
-  // Live timer & simulated elapsed minutes
+  // Live timer (strictly monotonic—no fast-forward)
   const [liveSeconds, setLiveSeconds] = useState(0);
-  const [simulatedBonusMinutes, setSimulatedBonusMinutes] = useState(0);
 
-  // Voice check state (strictly <= 10 seconds!)
+  // Live Microphone Voice Check (strictly <= 10s + WebAudio RMS liveness check)
   const [whisperMode, setWhisperMode] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [liveMicLevel, setLiveMicLevel] = useState(0);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [spokenTranscriptPreview, setSpokenTranscriptPreview] = useState('');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const speechRecRef = useRef<{ stop: () => void } | null>(null);
 
-  // Comprehension check state
+  // Comprehension check
   const [selectedAnswerIdx, setSelectedAnswerIdx] = useState<number | null>(null);
+  const [generatedQuestion, setGeneratedQuestion] = useState<{
+    prompt: string;
+    options: string[];
+    correctIndex: number;
+    explanation: string;
+  } | null>(null);
 
-  // Completed session output
   const [completedResult, setCompletedResult] = useState<ReadingSession | null>(null);
+
+  const activeChallenge = useMemo(
+    () =>
+      challenges.find(
+        (c) =>
+          c.id === (activeDraft?.challenge_id ?? sessionModalChallengeId) ||
+          c.participants.some((p) => p.userId === user?.id)
+      ) ?? null,
+    [challenges, activeDraft?.challenge_id, sessionModalChallengeId, user?.id]
+  );
+
+  const strictChallengeActive = Boolean(
+    sessionModalChallengeId ||
+      activeDraft?.challenge_id ||
+      activeChallenge?.strict_verification ||
+      user?.settings_json.challengeMode
+  );
 
   const stopCameraStream = () => {
     if (mediaStreamRef.current) {
@@ -116,7 +129,6 @@ export function SessionRunnerModal() {
     setCameraActive(false);
   };
 
-  // Sync modal state when opened or when resuming an offline draft
   useEffect(() => {
     if (!sessionModalOpen) {
       stopCameraStream();
@@ -126,36 +138,40 @@ export function SessionRunnerModal() {
     setWhisperMode(Boolean(user?.settings_json.whisperModeDefault));
     setCompletedResult(null);
     setSelectedAnswerIdx(null);
+    setGeneratedQuestion(null);
+    setScanError(null);
+    setVoiceError(null);
 
     if (activeDraft) {
       setSelectedBookId(activeDraft.book_id);
       setMedium(activeDraft.medium);
       setStartPage(activeDraft.start_page);
       const book = books.find((b) => b.id === activeDraft.book_id);
-      setEndPage(Math.min(book?.page_count ?? 300, activeDraft.start_page + 14));
+      setEndPage(Math.min(book?.page_count ?? 300, activeDraft.start_page + 10));
       setStep('live_reading');
       return;
     }
 
+    const readingBooks = books.filter((b) => b.status === 'reading' || b.status === 'tbr');
     const initialBook =
-      books.find((b) => b.id === sessionModalBookId) ||
-      readingBooks[0] ||
-      books[0];
+      books.find((b) => b.id === sessionModalBookId) || readingBooks[0] || books[0];
 
     if (initialBook) {
       setSelectedBookId(initialBook.id);
       setMedium(initialBook.medium_default);
       setStartPage(initialBook.current_page);
-      setEndPage(Math.min(initialBook.page_count, initialBook.current_page + 14));
+      setEndPage(Math.min(initialBook.page_count, initialBook.current_page + 10));
     }
     setStartScanResult(null);
     setEndScanResult(null);
-    setCapturedPreviewUrl(null);
-    setSimulatedBonusMinutes(0);
-    setEreaderShareText('');
-    setEreaderImportConfirmed(false);
     setStep('setup');
-  }, [sessionModalOpen, sessionModalBookId, activeDraft, books, readingBooks, user?.settings_json.whisperModeDefault]);
+  }, [
+    sessionModalOpen,
+    sessionModalBookId,
+    activeDraft,
+    books,
+    user?.settings_json.whisperModeDefault,
+  ]);
 
   const currentBook = useMemo(
     () => books.find((b) => b.id === selectedBookId) ?? books[0] ?? null,
@@ -184,7 +200,7 @@ export function SessionRunnerModal() {
     return Math.round(recent.reduce((acc, s) => acc + s.trust_score, 0) / recent.length);
   }, [sessions]);
 
-  // Live reading stopwatch + passive visibilitychange / blur tracking
+  // Live reading stopwatch + passive visibility tracking
   useEffect(() => {
     if (!sessionModalOpen || step !== 'live_reading' || !activeDraft) return;
 
@@ -219,21 +235,30 @@ export function SessionRunnerModal() {
     };
   }, [sessionModalOpen, step, activeDraft, updateSessionDraft]);
 
-  // Passage excerpt from scanned page range for Tier 2 Voice / Comprehension checks
-  const activePassage = useMemo(() => {
-    if (!currentBook) return null;
-    const matched =
-      currentBook.sample_passages.find(
-        (p) => startPage >= p.pageStart && startPage <= p.pageEnd
-      ) || currentBook.sample_passages[0];
-    if (matched) return matched;
-    return {
-      pageStart: 1,
-      pageEnd: currentBook.page_count,
-      excerpt:
-        'Steady attention turns brief daily reading windows into lasting understanding across every chapter.',
-    };
-  }, [currentBook, startPage]);
+  // Reference passage: prefer actual OCR-scanned page text if extracted, else book sample passage
+  const referenceExcerpt = useMemo(() => {
+    const ocrSnippet =
+      endScanResult?.extractedSnippet && endScanResult.extractedSnippet.length > 35
+        ? endScanResult.extractedSnippet
+        : activeDraft?.start_extracted_snippet &&
+          activeDraft.start_extracted_snippet.length > 35
+        ? activeDraft.start_extracted_snippet
+        : '';
+
+    if (ocrSnippet && !ocrSnippet.startsWith('Offline') && !ocrSnippet.startsWith('Live page')) {
+      return ocrSnippet;
+    }
+
+    if (currentBook && currentBook.sample_passages.length > 0) {
+      const matched =
+        currentBook.sample_passages.find(
+          (p) => startPage >= p.pageStart && startPage <= p.pageEnd
+        ) || currentBook.sample_passages[0];
+      return matched.excerpt;
+    }
+
+    return '';
+  }, [currentBook, startPage, endScanResult, activeDraft?.start_extracted_snippet]);
 
   const spanForecast = useMemo(() => {
     if (!currentBook || !wpmBand) return null;
@@ -249,46 +274,99 @@ export function SessionRunnerModal() {
     });
   }, [currentBook, wpmBand, endPage, startPage, startScanResult, endScanResult]);
 
-  if (!sessionModalOpen || !currentBook) return null;
+  if (!sessionModalOpen) return null;
 
-  const totalElapsedMinutes =
-    Math.round(((liveSeconds + simulatedBonusMinutes * 60) / 60) * 10) / 10;
+  // Empty library guard: prompt user to add their real book first
+  if (!currentBook) {
+    return (
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-11 h-11 rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto">
+            <BookOpen className="w-5 h-5" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="text-base font-semibold text-zinc-900 dark:text-white">
+              Add a book to start reading
+            </h3>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Search by title, scan an ISBN barcode, or enter your book first.
+            </p>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              onClick={closeSessionFlow}
+              className="flex-1 py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                closeSessionFlow();
+                setAddBookModalOpen(true);
+              }}
+              className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
+            >
+              Add Book
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-  // --- Camera & Sample Scan Handlers ---
+  const totalElapsedMinutes = Math.round((liveSeconds / 60) * 10) / 10;
+
+  // --- LIVE CAMERA ONLY SCANNER ---
   const requestCameraWithExplainer = (target: 'start' | 'end') => {
     setScanTarget(target);
+    setScanError(null);
     if (!user?.settings_json.cameraExplainerSeen) {
       setStep('camera_explainer');
       return;
     }
-    openLiveWebcam();
+    openLiveWebcam(target);
   };
 
-  const openLiveWebcam = async () => {
+  const openLiveWebcam = async (targetOverride?: 'start' | 'end') => {
+    const activeTarget = targetOverride ?? scanTarget;
+    setScanError(null);
     await updateProfile({ settingsPatch: { cameraExplainerSeen: true } });
     if (step === 'camera_explainer') {
-      setStep(scanTarget === 'start' ? 'setup' : 'end_boundary');
+      setStep(activeTarget === 'start' ? 'setup' : 'end_boundary');
     }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setScanError('Camera access is not available on this device/browser.');
+      return;
+    }
+
     try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-        });
-        mediaStreamRef.current = stream;
-        setCameraActive(true);
-        setTimeout(() => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-        }, 100);
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 960 },
+        },
+      });
+      mediaStreamRef.current = stream;
+      setCameraActive(true);
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      }, 80);
     } catch {
       setCameraActive(false);
+      setScanError('Camera permission denied. Allow camera access to verify your page scan.');
     }
   };
 
-  const captureWebcamFrame = async () => {
-    if (!videoRef.current) return;
+  const captureLiveWebcamFrame = async () => {
+    if (!videoRef.current || videoRef.current.readyState < 2) {
+      setScanError('Camera stream is still warming up—wait a moment and tap Capture.');
+      return;
+    }
+
     const canvas = document.createElement('canvas');
     canvas.width = videoRef.current.videoWidth || 640;
     canvas.height = videoRef.current.videoHeight || 840;
@@ -297,58 +375,49 @@ export function SessionRunnerModal() {
     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/png');
     stopCameraStream();
-    await runOcrOnDataUrl(dataUrl, scanTarget === 'start' ? startPage : endPage);
-  };
 
-  const handleFileScanUpload = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-    target: 'start' | 'end'
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setScanTarget(target);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      if (typeof reader.result === 'string') {
-        await runOcrOnDataUrl(reader.result, target === 'start' ? startPage : endPage);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSamplePresetScan = async (
-    preset: 'crisp' | 'dim_angled' | 'dense_academic' | 'ereader_progress',
-    target: 'start' | 'end'
-  ) => {
-    setScanTarget(target);
-    const pageNum = target === 'start' ? Math.max(1, startPage) : Math.max(startPage + 1, endPage);
-    const dataUrl = renderSamplePageCapture({
-      bookTitle: currentBook.title,
-      pageNumber: pageNum,
-      passageText: activePassage?.excerpt ?? '',
-      preset,
-      totalPages: currentBook.page_count,
-    });
-    await runOcrOnDataUrl(dataUrl, pageNum);
-  };
-
-  const runOcrOnDataUrl = async (dataUrl: string, hintPage: number) => {
     setScanning(true);
-    setCapturedPreviewUrl(dataUrl);
+    setScanError(null);
     try {
-      const analysis = await analyzePageCapture(dataUrl, hintPage);
+      const hint = scanTarget === 'start' ? startPage : endPage;
+      const analysis = await analyzePageCapture(dataUrl, hint);
+
+      if (!analysis.livenessValid) {
+        setScanError(
+          analysis.rejectionReason ||
+            'Could not detect readable page text. Frame your open page under clear light.'
+        );
+        return;
+      }
+
+      // If scanning End Page, block scanning the exact same page frame as Start Page!
+      if (
+        scanTarget === 'end' &&
+        activeDraft?.start_frame_signature &&
+        computeSignatureDistance(activeDraft.start_frame_signature, analysis.frameSignature) <= 3
+      ) {
+        setScanError(
+          'Anti-cheat alert: End scan matches your start page frame. Scan the new page you reached.'
+        );
+        return;
+      }
+
       if (scanTarget === 'start') {
         setStartScanResult(analysis);
         if (analysis.detectedPage) {
-          setStartPage(Math.min(currentBook.page_count, analysis.detectedPage));
-          setEndPage(
-            Math.min(currentBook.page_count, analysis.detectedPage + 14)
-          );
+          const pg = Math.min(currentBook.page_count, analysis.detectedPage);
+          setStartPage(pg);
+          setEndPage(Math.min(currentBook.page_count, pg + 10));
         }
       } else {
         setEndScanResult(analysis);
         if (analysis.detectedPage) {
-          setEndPage(Math.min(currentBook.page_count, analysis.detectedPage));
+          setEndPage(
+            Math.max(
+              activeDraft?.start_page ?? startPage,
+              Math.min(currentBook.page_count, analysis.detectedPage)
+            )
+          );
         }
       }
     } finally {
@@ -356,24 +425,13 @@ export function SessionRunnerModal() {
     }
   };
 
-  const handleParseEreaderShareSnippet = () => {
-    // Supports e.g. "Kindle · Page 248 of 616 (40%)" or "Location 3120 · 42%"
-    const pctMatch = ereaderShareText.match(/(\d{1,3})\s*%/);
-    const pageMatch = ereaderShareText.match(/page\s+(\d{1,4})/i);
-    if (pageMatch) {
-      const pg = Math.min(currentBook.page_count, parseInt(pageMatch[1], 10));
-      setEndPage(Math.max(startPage + 1, pg));
-      setEreaderImportConfirmed(true);
-    } else if (pctMatch) {
-      const pct = Math.min(100, parseInt(pctMatch[1], 10));
-      const pg = Math.round((pct / 100) * currentBook.page_count);
-      setEndPage(Math.max(startPage + 1, pg));
-      setEreaderImportConfirmed(true);
-    }
-  };
-
   const handleBeginReading = async () => {
+    if (strictChallengeActive && !startScanResult?.livenessValid) {
+      setScanError('Challenge sessions require a live camera scan of your starting page.');
+      return;
+    }
     stopCameraStream();
+
     const hasRecentVariance = sessions
       .slice(0, 3)
       .some((s) => s.flags_json.some((f) => f.code === 'pace_variance'));
@@ -382,7 +440,8 @@ export function SessionRunnerModal() {
       hasRecentPaceVariance: hasRecentVariance,
       activeStrikeCount: user?.strike_count ?? 0,
     });
-    const randomScheduled = Math.random() < prob || Boolean(sessionModalCureTargetId);
+    const randomScheduled =
+      strictChallengeActive || Math.random() < prob || Boolean(sessionModalCureTargetId);
 
     await startSessionDraft({
       bookId: currentBook.id,
@@ -390,58 +449,128 @@ export function SessionRunnerModal() {
       startPage,
       startWordsOnPage: startScanResult?.estimatedWordsOnPage,
       startScanConfidence: startScanResult?.confidence,
+      startFrameSignature: startScanResult?.frameSignature ?? null,
+      startScannedLive: Boolean(startScanResult?.livenessValid),
+      startExtractedSnippet: startScanResult?.extractedSnippet,
       isCureAttemptFor: sessionModalCureTargetId,
+      challengeId: sessionModalChallengeId ?? activeChallenge?.id ?? null,
       randomCheckScheduled: randomScheduled,
     });
     setLiveSeconds(0);
-    setSimulatedBonusMinutes(0);
-    setCapturedPreviewUrl(null);
     setStep('live_reading');
   };
 
-  const handleProceedAfterEndBoundary = () => {
+  const handleProceedAfterEndBoundary = async () => {
     if (!activeDraft) return;
-    // Check if random Tier 2 voice check was scheduled (or if Cure Session requires active check)
+    if (strictChallengeActive && !endScanResult?.livenessValid) {
+      setScanError('Challenge sessions require a live camera scan of your ending page.');
+      return;
+    }
+
     if (activeDraft.random_check_scheduled && !activeDraft.random_check_completed) {
-      if (!user?.settings_json.micExplainerSeen) {
-        setStep('mic_explainer');
-      } else {
-        setStep('voice_check');
-      }
+      if (!user?.settings_json.micExplainerSeen) setStep('mic_explainer');
+      else setStep('voice_check');
       return;
     }
 
     if (
-      (user?.settings_json.comprehensionOptIn || user?.settings_json.challengeMode) &&
-      activePassage?.question &&
+      (strictChallengeActive || user?.settings_json.comprehensionOptIn) &&
+      referenceExcerpt.length >= 30 &&
       !activeDraft.comprehension_result
     ) {
-      setStep('comprehension_check');
+      await prepareComprehensionStep();
       return;
     }
 
-    finalizeSessionNow();
+    await finalizeSessionNow();
   };
 
-  // --- Tier 2 Voice Check (<= 10 seconds hard cap!) ---
+  const prepareComprehensionStep = async () => {
+    const builtInQuestion = currentBook.sample_passages.find((p) => p.question)?.question;
+    if (builtInQuestion) {
+      setGeneratedQuestion(builtInQuestion);
+      setStep('comprehension_check');
+      return;
+    }
+    try {
+      const res = await fetch('/api/comprehension', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excerpt: referenceExcerpt, bookTitle: currentBook.title }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.question) {
+          setGeneratedQuestion(data.question);
+          setStep('comprehension_check');
+          return;
+        }
+      }
+    } catch {}
+    await finalizeSessionNow();
+  };
+
+  // --- LIVE MICROPHONE VOICE VERIFICATION (with WebAudio RMS Liveness!) ---
   const startRealMicRecording = async () => {
-    await updateProfile({ settingsPatch: { micExplainerSeen: true } });
+    setVoiceError(null);
     setSpokenTranscriptPreview('');
     audioChunksRef.current = [];
+    await updateProfile({ settingsPatch: { micExplainerSeen: true } });
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
 
+      // WebAudio RMS voice-activity energy monitor (prevents muted/silent mic spoofing!)
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const audioCtx = new AudioCtx();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const pcm = new Uint8Array(analyser.fftSize);
+      let activeFramesWithVoice = 0;
+
       recorder.ondataavailable = (ev) => {
         if (ev.data.size > 0) audioChunksRef.current.push(ev.data);
       };
 
-      // Optional browser SpeechRecognition companion for fast token capture when offline/no OpenAI key
       const SpeechRecCtor =
-        (window as unknown as { SpeechRecognition?: new () => { lang: string; interimResults: boolean; continuous: boolean; onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void; start: () => void; stop: () => void }; webkitSpeechRecognition?: new () => { lang: string; interimResults: boolean; continuous: boolean; onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void; start: () => void; stop: () => void } }).SpeechRecognition ||
-        (window as unknown as { webkitSpeechRecognition?: new () => { lang: string; interimResults: boolean; continuous: boolean; onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void; start: () => void; stop: () => void } }).webkitSpeechRecognition;
+        (
+          window as unknown as {
+            SpeechRecognition?: new () => {
+              lang: string;
+              interimResults: boolean;
+              continuous: boolean;
+              onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
+              start: () => void;
+              stop: () => void;
+            };
+            webkitSpeechRecognition?: new () => {
+              lang: string;
+              interimResults: boolean;
+              continuous: boolean;
+              onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
+              start: () => void;
+              stop: () => void;
+            };
+          }
+        ).SpeechRecognition ||
+        (
+          window as unknown as {
+            webkitSpeechRecognition?: new () => {
+              lang: string;
+              interimResults: boolean;
+              continuous: boolean;
+              onresult: (e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
+              start: () => void;
+              stop: () => void;
+            };
+          }
+        ).webkitSpeechRecognition;
 
       let liveTranscript = '';
       if (SpeechRecCtor) {
@@ -460,9 +589,7 @@ export function SessionRunnerModal() {
           };
           rec.start();
           speechRecRef.current = rec;
-        } catch {
-          // Ignore if browser blocks Web Speech API
-        }
+        } catch {}
       }
 
       const startedRecMs = Date.now();
@@ -470,18 +597,29 @@ export function SessionRunnerModal() {
       setRecordingSeconds(0);
 
       const recInterval = window.setInterval(() => {
+        analyser.getByteTimeDomainData(pcm);
+        let sumSq = 0;
+        for (let i = 0; i < pcm.length; i++) {
+          const norm = (pcm[i] - 128) / 128;
+          sumSq += norm * norm;
+        }
+        const rms = Math.sqrt(sumSq / pcm.length);
+        setLiveMicLevel(Math.min(100, Math.round(rms * 360)));
+        if (rms > 0.018) activeFramesWithVoice++;
+
         const secs = (Date.now() - startedRecMs) / 1000;
         setRecordingSeconds(Math.min(10, Math.round(secs * 10) / 10));
-        // Non-negotiable principle: never require speaking for > 10 seconds!
         if (secs >= 9.8 && recorder.state === 'recording') {
           recorder.stop();
         }
-      }, 200);
+      }, 150);
 
       recorder.onstop = async () => {
         window.clearInterval(recInterval);
         setIsRecordingVoice(false);
+        setLiveMicLevel(0);
         stream.getTracks().forEach((t) => t.stop());
+        audioCtx.close().catch(() => {});
         if (speechRecRef.current) {
           try {
             speechRecRef.current.stop();
@@ -489,17 +627,21 @@ export function SessionRunnerModal() {
         }
 
         const durationSec = Math.max(2, Math.min(10, (Date.now() - startedRecMs) / 1000));
+        const rmsVoiceDetected = activeFramesWithVoice >= 4;
         const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+
         await submitVoiceVerificationBlob(
           blob,
           liveTranscript || spokenTranscriptPreview,
-          durationSec
+          durationSec,
+          rmsVoiceDetected
         );
       };
 
       recorder.start();
     } catch {
       setIsRecordingVoice(false);
+      setVoiceError('Microphone access was blocked. Allow microphone permission to verify.');
     }
   };
 
@@ -510,16 +652,34 @@ export function SessionRunnerModal() {
   };
 
   const submitVoiceVerificationBlob = async (
-    audioBlob: Blob | null,
+    audioBlob: Blob,
     transcriptText: string,
-    durationSeconds: number
+    durationSeconds: number,
+    rmsVoiceDetected: boolean
   ) => {
     if (!activeDraft) return;
+    if (!rmsVoiceDetected) {
+      setVoiceError('No voice detected on microphone. Speak clearly for 5–8 seconds.');
+      await updateSessionDraft(activeDraft.id, {
+        random_check_completed: true,
+        voice_check_result: {
+          result: 'fail',
+          confidence: 0.1,
+          matchedRatio: 0,
+          wps: 0,
+          whisperMode,
+          rmsVoiceDetected: false,
+          explanation: 'Microphone stream was silent.',
+        },
+      });
+      return;
+    }
+
     setVoiceBusy(true);
     try {
       const form = new FormData();
-      if (audioBlob) form.append('audio', audioBlob, 'check.webm');
-      form.append('expectedText', activePassage?.excerpt ?? '');
+      form.append('audio', audioBlob, 'check.webm');
+      form.append('expectedText', referenceExcerpt);
       form.append('transcript', transcriptText);
       form.append('durationSeconds', String(durationSeconds));
       form.append('whisperMode', String(whisperMode));
@@ -527,11 +687,11 @@ export function SessionRunnerModal() {
         'retainAudioForDebug',
         String(Boolean(user?.settings_json.retainAudioForDebug))
       );
-      form.append('anySentenceFallback', String(medium === 'ebook' && !activePassage));
+      form.append('anySentenceFallback', String(referenceExcerpt.length === 0));
 
       const res = await fetch('/api/verify-speech', {
         method: 'POST',
-        headers: { 'x-user-id': user?.id ?? 'local' },
+        headers: { 'x-user-id': user?.id ?? 'auth' },
         body: form,
       });
 
@@ -545,69 +705,26 @@ export function SessionRunnerModal() {
             matchedRatio: data.matchedRatio,
             wps: data.wordsPerSecond,
             whisperMode: Boolean(data.whisperMode),
+            rmsVoiceDetected: true,
             explanation: data.explanation,
           },
         });
       }
-    } catch {
-      // Offline fallback local token check
-      await updateSessionDraft(activeDraft.id, {
-        random_check_completed: true,
-        voice_check_result: {
-          result: 'pass',
-          confidence: 0.85,
-          matchedRatio: 0.78,
-          wps: 2.3,
-          whisperMode,
-          explanation: 'Verified locally offline; result queued for sync.',
-        },
-      });
     } finally {
       setVoiceBusy(false);
     }
   };
 
-  const handleSimulatedVoiceSample = async (mode: 'match' | 'whisper_match' | 'mismatch') => {
-    const excerptWords = (activePassage?.excerpt ?? '').split(/\s+/);
-    if (mode === 'match') {
-      setWhisperMode(false);
-      await submitVoiceVerificationBlob(
-        null,
-        excerptWords.slice(0, 16).join(' '),
-        6.8
-      );
-    } else if (mode === 'whisper_match') {
-      setWhisperMode(true);
-      // Partial soft whisper match (~55% tokens) passes in Whisper Mode!
-      const partial = excerptWords
-        .slice(0, 14)
-        .filter((_, idx) => idx % 3 !== 2)
-        .join(' ');
-      await submitVoiceVerificationBlob(null, partial, 7.4);
-    } else {
-      await submitVoiceVerificationBlob(
-        null,
-        'unrelated words from a completely different broadcast station',
-        5.5
-      );
-    }
-  };
-
   const handleComprehensionSubmit = async () => {
-    if (!activeDraft || !activePassage?.question || selectedAnswerIdx === null) return;
-    const isCorrect = selectedAnswerIdx === activePassage.question.correctIndex;
-    await updateSessionDraft(activeDraft.id, {
-      comprehension_result: {
-        result: isCorrect ? 'pass' : 'fail',
-        confidence: isCorrect ? 0.95 : 0.3,
-        explanation: activePassage.question.explanation,
-      },
-    });
-    await finalizeSessionNow({
-      result: isCorrect ? 'pass' : 'fail',
+    if (!activeDraft || !generatedQuestion || selectedAnswerIdx === null) return;
+    const isCorrect = selectedAnswerIdx === generatedQuestion.correctIndex;
+    const compRes = {
+      result: (isCorrect ? 'pass' : 'fail') as 'pass' | 'fail',
       confidence: isCorrect ? 0.95 : 0.3,
-      explanation: activePassage.question.explanation,
-    });
+      explanation: generatedQuestion.explanation,
+    };
+    await updateSessionDraft(activeDraft.id, { comprehension_result: compRes });
+    await finalizeSessionNow(compRes);
   };
 
   const finalizeSessionNow = async (
@@ -622,22 +739,18 @@ export function SessionRunnerModal() {
       ? { ...activeDraft, comprehension_result: explicitComp }
       : activeDraft;
 
-    const hasTier1 =
-      Boolean(startScanResult || endScanResult || activeDraft.start_scan_confidence) ||
-      ereaderImportConfirmed;
-
-    const overrideMins =
-      simulatedBonusMinutes > 0
-        ? Math.max(0.5, liveSeconds / 60 + simulatedBonusMinutes)
-        : undefined;
+    const liveEnd = Boolean(endScanResult?.livenessValid);
+    const hasTier1 = Boolean(activeDraft.start_scanned_live && liveEnd);
 
     const finished = await completeReadingSession({
       draft: mergedDraft,
       endPage: Math.max(activeDraft.start_page, endPage),
       endWordsOnPage: endScanResult?.estimatedWordsOnPage,
       endScanConfidence: endScanResult?.confidence,
+      endFrameSignature: endScanResult?.frameSignature ?? null,
+      endScannedLive: liveEnd,
       hasTier1ScanOrImport: hasTier1,
-      overrideElapsedMinutes: overrideMins,
+      strictChallengeMode: strictChallengeActive,
     });
     setCompletedResult(finished);
     setStep('result');
@@ -646,34 +759,38 @@ export function SessionRunnerModal() {
   const isPwaProfile = interactionProfile === 'pwa';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
         className={`w-full ${
-          isPwaProfile ? 'max-w-lg rounded-t-3xl sm:rounded-3xl' : 'max-w-2xl rounded-2xl'
-        } bg-paper-50 dark:bg-ink-900 border border-stone-200 dark:border-stone-800 shadow-2xl max-h-[94vh] flex flex-col overflow-hidden`}
+          isPwaProfile ? 'max-w-lg rounded-t-3xl sm:rounded-3xl' : 'max-w-xl rounded-2xl'
+        } bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl max-h-[92vh] flex flex-col overflow-hidden`}
       >
-        {/* Top bar */}
-        <div className="px-5 py-4 border-b border-stone-200 dark:border-stone-800 flex items-center justify-between gap-3">
+        {/* Header */}
+        <div className="px-5 py-3.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-2 min-w-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <span className="p-2 rounded-xl bg-emerald-700/15 text-emerald-700 dark:text-emerald-300">
+            <span className="p-2 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
               <BookOpen className="w-4 h-4" />
             </span>
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-stone-900 dark:text-stone-100 truncate">
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
                 {sessionModalCureTargetId
-                  ? '7-Day Strike Cure Session (≥10m Verified)'
+                  ? 'Strike Cure Session (≥10m)'
                   : step === 'live_reading'
-                  ? 'Live Reading Coach'
+                  ? 'Live Reading Timer'
                   : step === 'result'
-                  ? 'Session Summary & Trust Telemetry'
-                  : 'Start Verified Reading Session'}
+                  ? 'Session Verified Result'
+                  : 'Verified Reading Session'}
               </h2>
-              <div className="flex items-center gap-2 text-[11px] text-stone-500 dark:text-stone-400">
+              <div className="flex items-center gap-2 text-[11px] text-zinc-500 truncate">
                 <span className="truncate">{currentBook.title}</span>
+                {strictChallengeActive && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium shrink-0">
+                    <Trophy className="w-3 h-3" /> Challenge Seal
+                  </span>
+                )}
                 {!isOnline && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 font-medium">
-                    <WifiOff className="w-3 h-3" />
-                    Offline · Will sync
+                  <span className="inline-flex items-center gap-1 text-amber-600 shrink-0">
+                    <WifiOff className="w-3 h-3" /> Offline
                   </span>
                 )}
               </div>
@@ -681,31 +798,20 @@ export function SessionRunnerModal() {
           </div>
           <button
             onClick={closeSessionFlow}
-            aria-label="Close session window"
-            className="p-2 rounded-xl text-stone-500 hover:bg-stone-200/70 dark:hover:bg-stone-800"
+            aria-label="Close"
+            className="p-2 rounded-xl text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Scrollable body */}
-        <div className="p-5 overflow-y-auto space-y-5">
-          {/* STEP 1: SETUP & START SCAN */}
+        {/* Body */}
+        <div className="p-5 overflow-y-auto overflow-x-hidden space-y-4">
           {step === 'setup' && (
             <div className="space-y-4">
-              {sessionModalCureTargetId && (
-                <div className="rounded-xl border border-emerald-700/30 bg-emerald-700/10 p-3.5 text-xs text-emerald-900 dark:text-emerald-200">
-                  <span className="font-semibold">Cure Path Active:</span> Complete at least{' '}
-                  <span className="font-mono font-semibold">10 minutes</span> of verified reading to
-                  clear your recent strike and restore full streak credit.
-                </div>
-              )}
-
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-400 mb-1">
-                    Book
-                  </label>
+                <div className="min-w-0">
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Book</label>
                   <select
                     value={selectedBookId}
                     onChange={(e) => {
@@ -714,24 +820,22 @@ export function SessionRunnerModal() {
                       if (b) {
                         setMedium(b.medium_default);
                         setStartPage(b.current_page);
-                        setEndPage(Math.min(b.page_count, b.current_page + 14));
+                        setEndPage(Math.min(b.page_count, b.current_page + 10));
                       }
                     }}
-                    className="w-full rounded-xl border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-800 px-3 py-2 text-sm text-stone-900 dark:text-stone-100"
+                    className="w-full rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-xs font-medium truncate"
                   >
                     {books.map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.title} (p. {b.current_page}/{b.page_count})
+                        {b.title} (p.{b.current_page}/{b.page_count})
                       </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-stone-600 dark:text-stone-400 mb-1">
-                    Reading Medium
-                  </label>
-                  <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-stone-200/70 dark:bg-ink-800 p-1">
+                  <label className="block text-xs font-medium text-zinc-500 mb-1">Medium</label>
+                  <div className="grid grid-cols-3 gap-1 rounded-xl bg-zinc-100 dark:bg-zinc-800 p-1">
                     {(['physical', 'ebook', 'audio'] as ReadingMedium[]).map((m) => (
                       <button
                         key={m}
@@ -739,8 +843,8 @@ export function SessionRunnerModal() {
                         onClick={() => setMedium(m)}
                         className={`py-1.5 rounded-lg text-xs font-medium capitalize transition ${
                           medium === m
-                            ? 'bg-white dark:bg-ink-700 text-stone-900 dark:text-white shadow-sm'
-                            : 'text-stone-600 dark:text-stone-400'
+                            ? 'bg-white dark:bg-zinc-700 text-zinc-900 dark:text-white shadow-sm'
+                            : 'text-zinc-500'
                         }`}
                       >
                         {m === 'ebook' ? 'E-Reader' : m}
@@ -750,39 +854,30 @@ export function SessionRunnerModal() {
                 </div>
               </div>
 
-              {/* Speed comfort band info */}
               {wpmBand && (
-                <div className="rounded-xl bg-paper-100 dark:bg-ink-800/80 border border-stone-200/80 dark:border-stone-800 p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div>
-                    <span className="text-stone-500 dark:text-stone-400">Genre Pace Band: </span>
-                    <span className="font-mono font-semibold text-stone-900 dark:text-stone-100">
-                      {wpmBand.lowWpm}–{wpmBand.highWpm} WPM
-                    </span>{' '}
-                    <span className="text-stone-500">
-                      ({GENRE_META[currentBook.genre[0]]?.label}, Band {currentBook.difficulty_band}/5)
-                    </span>
-                  </div>
-                  <span className="font-mono text-emerald-700 dark:text-emerald-300">
-                    ~{wpmBand.expectedWpm} WPM expected
+                <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-800 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-zinc-500 truncate">
+                    {GENRE_META[currentBook.genre[0]]?.label} pace
+                  </span>
+                  <span className="font-mono font-semibold text-emerald-600 dark:text-emerald-400 shrink-0">
+                    {wpmBand.lowWpm}–{wpmBand.highWpm} WPM
                   </span>
                 </div>
               )}
 
-              {/* Start Page Boundary: Physical Scan or E-Reader Progress */}
-              <div className="rounded-2xl border border-stone-200 dark:border-stone-800 p-4 space-y-3 bg-white/70 dark:bg-ink-800/40">
+              {/* Live Camera Scan Box (NO image upload!) */}
+              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
-                      {medium === 'physical'
-                        ? 'Tier 1 · Start Page Scan (Optional — Never Every Page)'
-                        : 'Tier 1 · Start Progress Boundary'}
-                    </h3>
-                    <p className="text-xs text-stone-600 dark:text-stone-400 mt-0.5">
-                      Scan the opening page to calibrate word density, or enter the page manually.
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                      Live Start Page Scan
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      Live camera only · Image uploads disabled
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-stone-500">Start p.</label>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-xs text-zinc-500">p.</span>
                     <input
                       type="number"
                       min={0}
@@ -793,84 +888,50 @@ export function SessionRunnerModal() {
                           Math.max(0, Math.min(currentBook.page_count, Number(e.target.value) || 0))
                         )
                       }
-                      className="w-20 rounded-lg border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-center"
+                      className="w-16 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-2 py-1 font-mono text-xs text-center"
                     />
                   </div>
                 </div>
 
-                {/* Camera / Upload / Sample Page Presets */}
-                <div className="flex flex-wrap gap-2 pt-1">
+                {!cameraActive && (
                   <button
                     type="button"
                     onClick={() => requestCameraWithExplainer('start')}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-xs font-medium hover:opacity-90 transition"
+                    className="w-full py-2.5 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold inline-flex items-center justify-center gap-2 hover:opacity-90 transition"
                   >
-                    <Camera className="w-3.5 h-3.5" />
-                    Open Camera
+                    <Camera className="w-4 h-4" />
+                    {startScanResult ? 'Rescan Start Page' : 'Open Live Camera Scanner'}
                   </button>
-
-                  <label className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium cursor-pointer hover:bg-stone-100 dark:hover:bg-ink-800">
-                    <Upload className="w-3.5 h-3.5" />
-                    Upload Photo
-                    <input
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      className="hidden"
-                      onChange={(e) => handleFileScanUpload(e, 'start')}
-                    />
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSamplePresetScan(
-                        medium === 'ebook' ? 'ereader_progress' : 'crisp',
-                        'start'
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-700/30 bg-emerald-700/10 text-emerald-800 dark:text-emerald-300 text-xs font-medium hover:bg-emerald-700/20"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    {medium === 'ebook' ? 'Scan Sample E-Reader Screen' : 'Scan Crisp Sample Page'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleSamplePresetScan('dim_angled', 'start')}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-stone-300 dark:border-stone-700 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-ink-800"
-                  >
-                    Test Dim/Angled Photo
-                  </button>
-                </div>
+                )}
 
                 {cameraActive && scanTarget === 'start' && (
-                  <div className="rounded-xl overflow-hidden border border-stone-300 dark:border-stone-700 bg-black relative">
+                  <div className="rounded-2xl overflow-hidden border border-zinc-300 dark:border-zinc-700 bg-black relative">
                     <video
                       ref={videoRef}
                       autoPlay
                       playsInline
                       muted
-                      className="w-full h-52 object-cover"
+                      className="w-full h-56 object-cover"
                     />
-                    <div className="p-2.5 bg-black/80 flex justify-between items-center">
-                      <span className="text-xs text-stone-300">
-                        Align page text & page number inside frame
+                    <div className="absolute inset-4 border border-emerald-400/60 rounded-xl pointer-events-none" />
+                    <div className="p-3 bg-black/85 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-zinc-300 truncate">
+                        Frame page text & page number
                       </span>
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 shrink-0">
                         <button
                           type="button"
                           onClick={stopCameraStream}
-                          className="px-2.5 py-1 rounded-lg text-xs text-stone-300 hover:bg-white/10"
+                          className="px-2.5 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-white/10"
                         >
                           Cancel
                         </button>
                         <button
                           type="button"
-                          onClick={captureWebcamFrame}
-                          className="px-3 py-1 rounded-lg bg-emerald-600 text-white text-xs font-medium"
+                          onClick={captureLiveWebcamFrame}
+                          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
                         >
-                          Capture Page
+                          Capture Live
                         </button>
                       </div>
                     </div>
@@ -878,37 +939,25 @@ export function SessionRunnerModal() {
                 )}
 
                 {scanning && (
-                  <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300 py-2">
+                  <div className="flex items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    Running Tesseract.js & optical line-density estimation…
+                    Verifying live page liveness & word density…
                   </div>
                 )}
 
-                {startScanResult && !scanning && (
-                  <div className="rounded-xl bg-emerald-950/5 dark:bg-emerald-950/30 border border-emerald-700/25 p-3 flex items-start gap-3">
-                    {capturedPreviewUrl && (
-                      <img
-                        src={capturedPreviewUrl}
-                        alt="Captured start page"
-                        className="w-12 h-16 object-cover rounded border border-stone-300 dark:border-stone-700 shrink-0"
-                      />
-                    )}
-                    <div className="text-xs space-y-1 min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="font-semibold text-emerald-800 dark:text-emerald-300">
-                          OCR Confidence: {Math.round(startScanResult.confidence * 100)}% · ~
-                          {startScanResult.estimatedWordsOnPage} words/page
-                        </span>
-                        <span className="text-[11px] px-2 py-0.5 rounded bg-stone-200/80 dark:bg-ink-700 font-mono">
-                          {startScanResult.lightingQuality === 'good'
-                            ? 'Good lighting'
-                            : 'Dim/Angled tolerated'}
-                        </span>
-                      </div>
-                      <p className="text-stone-600 dark:text-stone-400 line-clamp-2 italic">
-                        “{startScanResult.extractedSnippet}”
-                      </p>
-                    </div>
+                {scanError && (
+                  <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                    {scanError}
+                  </div>
+                )}
+
+                {startScanResult?.livenessValid && !scanning && (
+                  <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3 py-2.5 text-xs flex items-center justify-between gap-2">
+                    <span className="text-emerald-800 dark:text-emerald-300 font-medium truncate">
+                      Live Scan Verified · {Math.round(startScanResult.confidence * 100)}% OCR (~
+                      {startScanResult.estimatedWordsOnPage} words)
+                    </span>
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                   </div>
                 )}
               </div>
@@ -916,167 +965,101 @@ export function SessionRunnerModal() {
               <button
                 type="button"
                 onClick={handleBeginReading}
-                className="w-full py-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm shadow-lg shadow-emerald-900/20 transition flex items-center justify-center gap-2"
+                className="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm flex items-center justify-center gap-2 transition"
               >
                 <Clock className="w-4 h-4" />
-                Start Calm Reading Timer (p. {startPage})
+                Start Reading (p. {startPage})
               </button>
             </div>
           )}
 
-          {/* PRE-PERMISSION CAMERA EXPLAINER */}
           {step === 'camera_explainer' && (
-            <div className="py-4 space-y-4 text-center max-w-md mx-auto">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-700/15 text-emerald-700 dark:text-emerald-300 flex items-center justify-center mx-auto">
-                <Camera className="w-6 h-6" />
+            <div className="py-4 space-y-4 text-center max-w-sm mx-auto">
+              <div className="w-11 h-11 rounded-2xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mx-auto">
+                <Camera className="w-5 h-5" />
               </div>
-              <h3 className="text-base font-semibold text-stone-900 dark:text-stone-100">
-                Why Booklit asks for a single page snapshot
-              </h3>
-              <p className="text-xs leading-relaxed text-stone-600 dark:text-stone-300">
-                Booklit <span className="font-semibold">never</span> watches you read or records
-                continuous video. A single snapshot of your start and end page estimates word
-                density locally in your browser so your pace forecast stays fair.
+              <h3 className="text-sm font-semibold">Live Page Boundary Check</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                Snap one live frame of your start and end page. No continuous video, and image
+                uploads are disabled to keep challenges fair.
               </p>
-              <div className="flex items-center justify-center gap-3 pt-2">
+              <div className="flex gap-2 justify-center pt-1">
+                {!strictChallengeActive && (
+                  <button
+                    type="button"
+                    onClick={() => setStep(scanTarget === 'start' ? 'setup' : 'end_boundary')}
+                    className="px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium"
+                  >
+                    Not now
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => setStep(scanTarget === 'start' ? 'setup' : 'end_boundary')}
-                  className="px-4 py-2.5 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium text-stone-700 dark:text-stone-300"
+                  onClick={() => openLiveWebcam()}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
                 >
-                  Not now (enter page manually)
-                </button>
-                <button
-                  type="button"
-                  onClick={openLiveWebcam}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
-                >
-                  Continue to Camera
+                  Open Camera
                 </button>
               </div>
             </div>
           )}
 
-          {/* STEP 2: CALM LIVE READING VIEW */}
           {step === 'live_reading' && activeDraft && (
-            <div className="space-y-5">
-              <div className="rounded-3xl bg-ink-950 text-paper-50 p-6 sm:p-8 text-center space-y-4 border border-stone-800">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-300 text-xs font-medium">
+            <div className="space-y-4">
+              <div className="rounded-3xl bg-zinc-950 text-white p-7 text-center space-y-3 border border-zinc-800">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/15 text-emerald-400 text-xs font-medium">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  Reading quietly from page {activeDraft.start_page}
+                  Reading from p. {activeDraft.start_page}
                 </div>
 
-                <div className="font-mono text-5xl sm:text-6xl font-light tracking-tight tabular-nums py-2">
-                  {String(Math.floor((liveSeconds + simulatedBonusMinutes * 60) / 60)).padStart(
-                    2,
-                    '0'
-                  )}
-                  :{String((liveSeconds + simulatedBonusMinutes * 60) % 60).padStart(2, '0')}
+                <div className="font-mono text-5xl font-light tracking-tight tabular-nums py-2">
+                  {String(Math.floor(liveSeconds / 60)).padStart(2, '0')}:
+                  {String(liveSeconds % 60).padStart(2, '0')}
                 </div>
 
-                <p className="text-xs text-stone-400 max-w-md mx-auto">
-                  You can lock your phone or switch to your e-reader—background time is never
-                  treated as a penalty. Draft is saved offline in IndexedDB.
+                <p className="text-[11px] text-zinc-400">
+                  Lock your screen freely while reading—session draft is saved offline.
                 </p>
-
-                {/* Demo/Testing Fast-Forward Stepper so reviewers can test 15m+ sessions & cures immediately */}
-                <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
-                  <span className="text-[11px] text-stone-400 flex items-center gap-1">
-                    <FastForward className="w-3 h-3" /> Quick-test timer offset:
-                  </span>
-                  {[5, 12, 22].map((mins) => (
-                    <button
-                      key={mins}
-                      type="button"
-                      onClick={() => setSimulatedBonusMinutes((prev) => prev + mins)}
-                      className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-mono text-stone-200 transition"
-                    >
-                      +{mins}m
-                    </button>
-                  ))}
-                  {simulatedBonusMinutes > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setSimulatedBonusMinutes(0)}
-                      className="px-2 py-1 rounded-lg text-[11px] text-stone-400 hover:text-white"
-                    >
-                      Reset
-                    </button>
-                  )}
-                </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={async () => {
                     await discardSessionDraft(activeDraft.id);
                     closeSessionFlow();
                   }}
-                  className="px-4 py-2.5 rounded-xl text-xs font-medium text-stone-500 hover:bg-stone-200/60 dark:hover:bg-ink-800"
+                  className="px-3.5 py-2.5 rounded-xl text-xs font-medium text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
                 >
-                  Discard Draft
+                  Cancel
                 </button>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!user?.settings_json.micExplainerSeen) setStep('mic_explainer');
-                      else setStep('voice_check');
-                    }}
-                    className="px-3.5 py-2.5 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-ink-800 inline-flex items-center gap-1.5"
-                  >
-                    <Mic className="w-3.5 h-3.5 text-emerald-600" />
-                    Optional 6s Voice Check
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Auto-suggest realistic end page from elapsed time if user moved time forward
-                      if (wpmBand && totalElapsedMinutes >= 2) {
-                        const wordsPerPage =
-                          currentBook.word_count_estimate / Math.max(1, currentBook.page_count);
-                        const suggestedPages = Math.max(
-                          2,
-                          Math.round((totalElapsedMinutes * wpmBand.expectedWpm) / wordsPerPage)
-                        );
-                        setEndPage(
-                          Math.min(
-                            currentBook.page_count,
-                            activeDraft.start_page + suggestedPages
-                          )
-                        );
-                      }
-                      setCapturedPreviewUrl(null);
-                      setStep('end_boundary');
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shadow"
-                  >
-                    Finish Reading →
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScanError(null);
+                    setStep('end_boundary');
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
+                >
+                  Finish & Scan End Page →
+                </button>
               </div>
             </div>
           )}
 
-          {/* STEP 3: END PAGE SCAN OR E-READER PROGRESS */}
           {step === 'end_boundary' && activeDraft && (
             <div className="space-y-4">
-              <div className="rounded-2xl border border-stone-200 dark:border-stone-800 p-4 space-y-3 bg-white/70 dark:bg-ink-800/40">
-                <div className="flex items-center justify-between gap-3">
+              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-semibold text-stone-900 dark:text-stone-100">
-                      Where did you finish reading?
-                    </h3>
-                    <p className="text-xs text-stone-500 dark:text-stone-400">
-                      Started on p. {activeDraft.start_page} · Elapsed{' '}
-                      <span className="font-mono">{totalElapsedMinutes.toFixed(1)}m</span>
+                    <h3 className="text-xs font-semibold">End Page Live Scan</h3>
+                    <p className="text-[11px] text-zinc-500">
+                      Started p.{activeDraft.start_page} · Elapsed {totalElapsedMinutes.toFixed(1)}m
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-stone-500">End p.</label>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-zinc-500">End p.</span>
                     <input
                       type="number"
                       min={activeDraft.start_page}
@@ -1090,294 +1073,256 @@ export function SessionRunnerModal() {
                           )
                         )
                       }
-                      className="w-20 rounded-lg border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-900 px-2.5 py-1.5 font-mono text-sm text-center"
+                      className="w-16 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-2 py-1 font-mono text-xs text-center"
                     />
                   </div>
                 </div>
 
                 {spanForecast && endPage > activeDraft.start_page && (
-                  <div className="rounded-xl bg-paper-100 dark:bg-ink-900 p-3 text-xs flex flex-wrap items-center justify-between gap-2">
-                    <span>
-                      Span:{' '}
-                      <strong className="font-mono">{endPage - activeDraft.start_page} pages</strong>{' '}
-                      (~{spanForecast.estimatedWords.toLocaleString()} words)
-                    </span>
-                    <span className="font-mono text-emerald-700 dark:text-emerald-300">
-                      Expected window (±35%): {spanForecast.toleranceLowMinutes.toFixed(1)}m –{' '}
+                  <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/70 px-3 py-2 text-xs flex items-center justify-between gap-2">
+                    <span>{endPage - activeDraft.start_page} pages</span>
+                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                      Expected: {spanForecast.toleranceLowMinutes.toFixed(1)}–
                       {spanForecast.toleranceHighMinutes.toFixed(1)}m
                     </span>
                   </div>
                 )}
 
-                {/* Physical or screenshot scan options */}
-                <div className="flex flex-wrap gap-2 pt-1">
+                {!cameraActive && (
                   <button
                     type="button"
                     onClick={() => requestCameraWithExplainer('end')}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-xs font-medium"
+                    className="w-full py-2.5 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold inline-flex items-center justify-center gap-2"
                   >
-                    <Camera className="w-3.5 h-3.5" />
-                    Scan End Page
+                    <Camera className="w-4 h-4" />
+                    {endScanResult ? 'Rescan End Page' : 'Scan End Page with Camera'}
                   </button>
+                )}
 
-                  <label className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium cursor-pointer">
-                    <Upload className="w-3.5 h-3.5" />
-                    Upload End Screenshot
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) => handleFileScanUpload(e, 'end')}
+                {cameraActive && scanTarget === 'end' && (
+                  <div className="rounded-2xl overflow-hidden border border-zinc-300 dark:border-zinc-700 bg-black relative">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-56 object-cover"
                     />
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSamplePresetScan(
-                        medium === 'ebook' ? 'ereader_progress' : 'crisp',
-                        'end'
-                      )
-                    }
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-700/30 bg-emerald-700/10 text-emerald-800 dark:text-emerald-300 text-xs font-medium"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    Simulate End Page OCR
-                  </button>
-                </div>
-
-                {/* E-Reader Share Sheet Companion Import */}
-                {medium === 'ebook' && (
-                  <div className="pt-2 border-t border-stone-200 dark:border-stone-700 space-y-2">
-                    <label className="block text-xs font-medium text-stone-600 dark:text-stone-300 flex items-center gap-1.5">
-                      <Tablet className="w-3.5 h-3.5" />
-                      Kindle / Kobo / Apple Books Share-Sheet Progress Import
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={ereaderShareText}
-                        onChange={(e) => setEreaderShareText(e.target.value)}
-                        placeholder={`e.g. "Kindle · Page ${endPage} of ${currentBook.page_count} (${Math.round(
-                          (endPage / currentBook.page_count) * 100
-                        )}%)"`}
-                        className="flex-1 rounded-lg border border-stone-300 dark:border-stone-700 bg-white dark:bg-ink-900 px-3 py-1.5 text-xs"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleParseEreaderShareSnippet}
-                        className="px-3 py-1.5 rounded-lg bg-stone-200 dark:bg-ink-700 text-xs font-medium"
-                      >
-                        Parse Delta
-                      </button>
+                    <div className="absolute inset-4 border border-emerald-400/60 rounded-xl pointer-events-none" />
+                    <div className="p-3 bg-black/85 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-zinc-300 truncate">
+                        Frame ending page clearly
+                      </span>
+                      <div className="flex gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={stopCameraStream}
+                          className="px-2.5 py-1.5 rounded-lg text-xs text-zinc-300"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={captureLiveWebcamFrame}
+                          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
+                        >
+                          Capture Live
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                {endScanResult && (
-                  <div className="rounded-xl bg-emerald-950/5 dark:bg-emerald-950/30 border border-emerald-700/25 p-3 text-xs flex items-center justify-between">
+                {scanning && (
+                  <div className="flex items-center gap-2 text-xs text-emerald-600">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Checking frame signature & OCR…
+                  </div>
+                )}
+
+                {scanError && (
+                  <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                    {scanError}
+                  </div>
+                )}
+
+                {endScanResult?.livenessValid && !scanning && (
+                  <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3 py-2.5 text-xs flex items-center justify-between">
                     <span className="text-emerald-800 dark:text-emerald-300 font-medium">
                       End Scan Verified · {Math.round(endScanResult.confidence * 100)}% OCR
-                      confidence (~{endScanResult.estimatedWordsOnPage} words/page)
                     </span>
                     <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                   </div>
                 )}
               </div>
 
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={() => setStep('live_reading')}
-                  className="px-4 py-2.5 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium"
+                  className="px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium"
                 >
-                  ← Back to Timer
+                  ← Timer
                 </button>
                 <button
                   type="button"
                   onClick={handleProceedAfterEndBoundary}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold"
                 >
-                  Complete & Score Session
+                  Verify & Complete
                 </button>
               </div>
             </div>
           )}
 
-          {/* PRE-PERMISSION MICROPHONE EXPLAINER */}
           {step === 'mic_explainer' && (
-            <div className="py-4 space-y-4 text-center max-w-md mx-auto">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-700/15 text-emerald-700 dark:text-emerald-300 flex items-center justify-center mx-auto">
-                <Mic className="w-6 h-6" />
+            <div className="py-4 space-y-4 text-center max-w-sm mx-auto">
+              <div className="w-11 h-11 rounded-2xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mx-auto">
+                <Mic className="w-5 h-5" />
               </div>
-              <h3 className="text-base font-semibold text-stone-900 dark:text-stone-100">
-                Quick 6-Second Passage Check (“Show me you’re still here”)
-              </h3>
-              <p className="text-xs leading-relaxed text-stone-600 dark:text-stone-300">
-                Read one short sentence aloud (or in <span className="font-semibold">Whisper Mode</span>{' '}
-                if in a quiet room) for 5–10 seconds. Raw audio is deleted immediately in memory
-                after token matching unless you explicitly opt into debug retention.
+              <h3 className="text-sm font-semibold">6-Second Live Voice Check</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                Read a short sentence aloud for 5–10 seconds. Audio is scored immediately and never
+                saved unless enabled in Settings.
               </p>
-              <div className="flex items-center justify-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (activeDraft) {
-                      finalizeSessionNow();
-                    } else {
-                      setStep('live_reading');
-                    }
-                  }}
-                  className="px-4 py-2.5 rounded-xl border border-stone-300 dark:border-stone-700 text-xs font-medium"
-                >
-                  Not now
-                </button>
+              <div className="flex gap-2 justify-center pt-1">
+                {!strictChallengeActive && (
+                  <button
+                    type="button"
+                    onClick={() => finalizeSessionNow()}
+                    className="px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs font-medium"
+                  >
+                    Skip
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={async () => {
                     await updateProfile({ settingsPatch: { micExplainerSeen: true } });
                     setStep('voice_check');
                   }}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
                 >
-                  Open 6s Voice Check
+                  Continue
                 </button>
               </div>
             </div>
           )}
 
-          {/* STEP 4: TIER 2 RANDOM VOICE CHECK (<= 10s HARD CAP) */}
           {step === 'voice_check' && activeDraft && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
-                  Tier 2 · Short Passage Check (Max 10s)
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                  Live Voice Check (Max 10s)
                 </span>
                 <button
                   type="button"
                   onClick={() => setWhisperMode((w) => !w)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition ${
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
                     whisperMode
-                      ? 'border-indigo-500 bg-indigo-500/15 text-indigo-700 dark:text-indigo-300'
-                      : 'border-stone-300 dark:border-stone-700 text-stone-600 dark:text-stone-400'
+                      ? 'border-indigo-500 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300'
+                      : 'border-zinc-200 dark:border-zinc-700 text-zinc-500'
                   }`}
                 >
-                  <VolumeX className="w-3.5 h-3.5" />
-                  {whisperMode ? 'Whisper Mode ON (46% threshold)' : 'Enable Quiet Whisper Mode'}
+                  <VolumeX className="w-3 h-3" />
+                  {whisperMode ? 'Whisper Mode ON' : 'Whisper Mode'}
                 </button>
               </div>
 
-              <div className="rounded-2xl bg-paper-100 dark:bg-ink-800 border border-stone-200 dark:border-stone-700 p-4 space-y-2">
-                <div className="text-[11px] text-stone-500 flex justify-between">
-                  <span>Passage from {currentBook.title}</span>
-                  <span>Read for 5–10 seconds</span>
+              <div className="rounded-2xl bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 p-4 space-y-1.5">
+                <div className="text-[11px] text-zinc-500">
+                  {referenceExcerpt
+                    ? 'Read this passage aloud (5–10s):'
+                    : 'Read one sentence from your current page aloud (5–10s):'}
                 </div>
-                <p className="font-serif text-base sm:text-lg leading-relaxed text-stone-900 dark:text-stone-100">
-                  “{activePassage?.excerpt}”
-                </p>
+                {referenceExcerpt && (
+                  <p className="font-serif text-sm sm:text-base leading-relaxed text-zinc-900 dark:text-zinc-100">
+                    “{referenceExcerpt}”
+                  </p>
+                )}
               </div>
 
-              {/* Microphone Record Button with 10s auto-stop cap */}
               <div className="flex flex-col items-center gap-3 py-2">
                 {!isRecordingVoice ? (
                   <button
                     type="button"
                     disabled={voiceBusy}
                     onClick={startRealMicRecording}
-                    className="px-6 py-3 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center gap-2 shadow-md disabled:opacity-50"
+                    className="px-6 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center gap-2 shadow disabled:opacity-50"
                   >
                     <Mic className="w-4 h-4" />
-                    {voiceBusy ? 'Scoring with Whisper Token Matcher…' : 'Record 6–10s Passage'}
+                    {voiceBusy ? 'Verifying speech…' : 'Record Live Voice (6–10s)'}
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={stopRealMicRecording}
-                    className="px-6 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold inline-flex items-center gap-2 animate-pulse"
-                  >
-                    Stop & Verify ({recordingSeconds.toFixed(1)}s / 10.0s max)
-                  </button>
+                  <div className="w-full space-y-2 text-center">
+                    <button
+                      type="button"
+                      onClick={stopRealMicRecording}
+                      className="px-6 py-3 rounded-2xl bg-rose-600 text-white text-xs font-semibold inline-flex items-center gap-2 animate-pulse"
+                    >
+                      Stop & Verify ({recordingSeconds.toFixed(1)}s / 10.0s)
+                    </button>
+                    <div className="w-48 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full mx-auto overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500 transition-all"
+                        style={{ width: `${liveMicLevel}%` }}
+                      />
+                    </div>
+                  </div>
                 )}
 
                 {spokenTranscriptPreview && (
-                  <p className="text-xs text-stone-500 italic">
-                    Captured: “{spokenTranscriptPreview}”
+                  <p className="text-xs text-zinc-500 italic text-center">
+                    “{spokenTranscriptPreview}”
                   </p>
                 )}
 
-                {/* Quick simulation controls for mic-less sandbox / testing */}
-                <div className="pt-2 border-t border-stone-200 dark:border-stone-800 w-full">
-                  <p className="text-[11px] text-stone-500 text-center mb-2">
-                    No microphone attached? Test the `/api/verify-speech` scoring engine directly:
+                {voiceError && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 text-center">
+                    {voiceError}
                   </p>
-                  <div className="flex flex-wrap justify-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleSimulatedVoiceSample('match')}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-700/10 text-emerald-800 dark:text-emerald-300 text-xs font-medium hover:bg-emerald-700/20"
-                    >
-                      Simulate Natural Read (Pass)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSimulatedVoiceSample('whisper_match')}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 text-xs font-medium hover:bg-indigo-500/20"
-                    >
-                      Simulate Quiet Whisper (Pass)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSimulatedVoiceSample('mismatch')}
-                      className="px-3 py-1.5 rounded-lg bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs font-medium hover:bg-amber-500/20"
-                    >
-                      Simulate Noisy Mismatch
-                    </button>
-                  </div>
-                </div>
+                )}
               </div>
 
               {activeDraft.voice_check_result && (
                 <div
-                  className={`rounded-xl p-3.5 border text-xs space-y-1 ${
+                  className={`rounded-xl p-3 border text-xs ${
                     activeDraft.voice_check_result.result === 'pass'
-                      ? 'border-emerald-600/30 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200'
-                      : 'border-amber-600/30 bg-amber-500/10 text-amber-900 dark:text-amber-200'
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                      : 'border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200'
                   }`}
                 >
                   <div className="font-semibold capitalize">
-                    Voice Result: {activeDraft.voice_check_result.result} (Confidence{' '}
+                    {activeDraft.voice_check_result.result} (
                     {Math.round(activeDraft.voice_check_result.confidence * 100)}%)
                   </div>
-                  <p>{activeDraft.voice_check_result.explanation}</p>
-                  <p className="text-[11px] opacity-80">
-                    Privacy: Raw audio clip was discarded immediately after token comparison.
-                  </p>
+                  <p className="mt-0.5">{activeDraft.voice_check_result.explanation}</p>
                 </div>
               )}
 
-              <div className="flex justify-between pt-2">
+              <div className="flex justify-between pt-1">
                 <button
                   type="button"
                   onClick={() => setStep('end_boundary')}
-                  className="px-4 py-2 rounded-xl border border-stone-300 dark:border-stone-700 text-xs"
+                  className="px-4 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-xs"
                 >
                   ← Back
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
+                  disabled={strictChallengeActive && !activeDraft.voice_check_result}
+                  onClick={async () => {
                     if (
-                      (user?.settings_json.comprehensionOptIn ||
-                        user?.settings_json.challengeMode) &&
-                      activePassage?.question &&
+                      (strictChallengeActive || user?.settings_json.comprehensionOptIn) &&
+                      referenceExcerpt.length >= 30 &&
                       !activeDraft.comprehension_result
                     ) {
-                      setStep('comprehension_check');
+                      await prepareComprehensionStep();
                     } else {
-                      finalizeSessionNow();
+                      await finalizeSessionNow();
                     }
                   }}
-                  className="px-5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-semibold"
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold disabled:opacity-40"
                 >
                   Continue →
                 </button>
@@ -1385,39 +1330,38 @@ export function SessionRunnerModal() {
             </div>
           )}
 
-          {/* STEP 5: OPTIONAL COMPREHENSION MICRO-CHECK */}
-          {step === 'comprehension_check' && activePassage?.question && (
+          {step === 'comprehension_check' && generatedQuestion && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
                   <HelpCircle className="w-3.5 h-3.5" />
-                  Optional Passage Micro-Check
+                  Passage Checkpoint
                 </span>
-                {!user?.settings_json.challengeMode && (
+                {!strictChallengeActive && (
                   <button
                     type="button"
                     onClick={() => finalizeSessionNow()}
-                    className="text-xs text-stone-500 hover:underline"
+                    className="text-xs text-zinc-500 hover:underline"
                   >
-                    Skip check
+                    Skip
                   </button>
                 )}
               </div>
 
-              <p className="text-sm font-medium text-stone-900 dark:text-stone-100">
-                {activePassage.question.prompt}
+              <p className="text-xs sm:text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {generatedQuestion.prompt}
               </p>
 
               <div className="space-y-2">
-                {activePassage.question.options.map((opt, idx) => (
+                {generatedQuestion.options.map((opt, idx) => (
                   <button
                     key={idx}
                     type="button"
                     onClick={() => setSelectedAnswerIdx(idx)}
                     className={`w-full text-left p-3 rounded-xl border text-xs transition ${
                       selectedAnswerIdx === idx
-                        ? 'border-emerald-600 bg-emerald-600/10 font-medium text-stone-900 dark:text-white'
-                        : 'border-stone-200 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-ink-800'
+                        ? 'border-emerald-600 bg-emerald-600/10 font-semibold'
+                        : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
                     }`}
                   >
                     {opt}
@@ -1429,104 +1373,86 @@ export function SessionRunnerModal() {
                 type="button"
                 disabled={selectedAnswerIdx === null}
                 onClick={handleComprehensionSubmit}
-                className="w-full py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-semibold disabled:opacity-40"
+                className="w-full py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold disabled:opacity-40"
               >
-                Submit & Finish Session
+                Submit & Finish
               </button>
             </div>
           )}
 
-          {/* STEP 6: SESSION RESULT CARD */}
           {step === 'result' && completedResult && (
             <div className="space-y-4">
               <div
-                className={`rounded-2xl p-5 border ${
+                className={`rounded-2xl p-4 border ${
                   completedResult.strike_issued
-                    ? 'border-rose-500/35 bg-rose-500/10'
+                    ? 'border-rose-500/30 bg-rose-500/10'
                     : completedResult.verified
-                    ? 'border-emerald-600/30 bg-emerald-600/10'
-                    : 'border-amber-500/35 bg-amber-500/10'
+                    ? 'border-emerald-500/30 bg-emerald-500/10'
+                    : 'border-amber-500/30 bg-amber-500/10'
                 }`}
               >
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
                     {completedResult.strike_issued ? (
-                      <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400" />
+                      <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
                     ) : (
-                      <ShieldCheck className="w-5 h-5 text-emerald-700 dark:text-emerald-300" />
+                      <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
                     )}
-                    <div>
-                      <h3 className="text-base font-semibold text-stone-900 dark:text-stone-100">
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-semibold truncate">
                         {completedResult.strike_issued
-                          ? 'Curable Strike Recorded (2 Signals Aligned)'
+                          ? 'Curable Strike Recorded'
                           : completedResult.verified
-                          ? 'Verified Reading Session'
-                          : 'Logged as Unverified Draft'}
+                          ? 'Verified Session'
+                          : 'Unverified Progress Logged'}
                       </h3>
-                      <p className="text-xs text-stone-600 dark:text-stone-300">
-                        Tier: <span className="capitalize">{completedResult.verification_tier}</span>{' '}
-                        · Pages {completedResult.start_page} → {completedResult.end_page}
+                      <p className="text-[11px] text-zinc-500">
+                        p.{completedResult.start_page} → {completedResult.end_page}
+                        {completedResult.challenge_eligible ? ' · Challenge Credited ✓' : ''}
                       </p>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-[11px] uppercase text-stone-500">Trust Score</div>
-                    <div className="font-mono text-2xl font-bold text-stone-900 dark:text-white">
+                  <div className="text-right shrink-0">
+                    <div className="font-mono text-xl font-bold">
                       {completedResult.trust_score}
-                      <span className="text-xs font-normal text-stone-500">/100</span>
+                      <span className="text-xs font-normal text-zinc-500">/100</span>
                     </div>
                   </div>
                 </div>
-
-                {completedResult.is_cure_for_session_id && (
-                  <div className="mt-3 rounded-xl bg-emerald-700 text-white px-3.5 py-2 text-xs font-medium flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    Strike Cured! This ≥10m verified make-up session cleared your prior strike and
-                    restored streak standing.
-                  </div>
-                )}
               </div>
 
-              {/* Predicted vs Actual & WPM Grid */}
-              <div className="grid grid-cols-3 gap-2.5 text-center">
-                <div className="rounded-xl bg-paper-100 dark:bg-ink-800 p-3 border border-stone-200/70 dark:border-stone-800">
-                  <div className="text-[11px] text-stone-500">Actual Time</div>
-                  <div className="font-mono text-base font-semibold text-stone-900 dark:text-white mt-0.5">
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 p-2.5">
+                  <div className="text-[10px] text-zinc-500">Actual</div>
+                  <div className="font-mono text-sm font-semibold mt-0.5">
                     {formatMinutesHuman(completedResult.actual_minutes)}
                   </div>
                 </div>
-                <div className="rounded-xl bg-paper-100 dark:bg-ink-800 p-3 border border-stone-200/70 dark:border-stone-800">
-                  <div className="text-[11px] text-stone-500">Predicted</div>
-                  <div className="font-mono text-base font-semibold text-stone-900 dark:text-white mt-0.5">
+                <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 p-2.5">
+                  <div className="text-[10px] text-zinc-500">Predicted</div>
+                  <div className="font-mono text-sm font-semibold mt-0.5">
                     {formatMinutesHuman(completedResult.predicted_minutes)}
                   </div>
                 </div>
-                <div className="rounded-xl bg-paper-100 dark:bg-ink-800 p-3 border border-stone-200/70 dark:border-stone-800">
-                  <div className="text-[11px] text-stone-500">Observed Pace</div>
-                  <div className="font-mono text-base font-semibold text-stone-900 dark:text-white mt-0.5">
-                    {completedResult.wpm_observed} <span className="text-xs font-normal">wpm</span>
+                <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800 p-2.5">
+                  <div className="text-[10px] text-zinc-500">Pace</div>
+                  <div className="font-mono text-sm font-semibold mt-0.5">
+                    {completedResult.wpm_observed} wpm
                   </div>
                 </div>
               </div>
 
-              {/* Transparent Flag Explanations & Cure Hints */}
               {completedResult.flags_json.length > 0 && (
                 <div className="space-y-2">
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-stone-500">
-                    Signal Transparency & Cure Guidance
-                  </h4>
                   {completedResult.flags_json.map((flag, i) => (
                     <div
                       key={i}
-                      className="rounded-xl border border-stone-200 dark:border-stone-700 p-3 text-xs space-y-1 bg-white/60 dark:bg-ink-800/60"
+                      className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-3 text-xs space-y-0.5"
                     >
-                      <div className="font-semibold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-                        <FileText className="w-3.5 h-3.5 text-amber-600" />
-                        {flag.label}
-                      </div>
-                      <p className="text-stone-600 dark:text-stone-300">{flag.explanation}</p>
-                      <p className="text-emerald-700 dark:text-emerald-300 font-medium">
-                        How to resolve: {flag.cureHint}
+                      <div className="font-semibold">{flag.label}</div>
+                      <p className="text-zinc-500">{flag.explanation}</p>
+                      <p className="text-emerald-600 dark:text-emerald-400 font-medium">
+                        {flag.cureHint}
                       </p>
                     </div>
                   ))}
@@ -1536,7 +1462,7 @@ export function SessionRunnerModal() {
               <button
                 type="button"
                 onClick={closeSessionFlow}
-                className="w-full py-3 rounded-2xl bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 text-sm font-semibold"
+                className="w-full py-3 rounded-2xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold"
               >
                 Done
               </button>

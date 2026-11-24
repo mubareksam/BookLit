@@ -8,6 +8,7 @@ import {
   VerificationTier,
 } from '../types';
 import { GenreSpeedEstimate, predictPageSpanMinutes } from './speedModel';
+import { computeSignatureDistance } from './ocrService';
 
 export interface SpeechVerificationEvaluation {
   result: VerificationResult;
@@ -32,6 +33,11 @@ export interface SessionScoringInput {
   startScanConfidence?: number;
   endScanConfidence?: number;
   hasTier1ScanOrImport: boolean;
+  liveCameraStart?: boolean;
+  liveCameraEnd?: boolean;
+  startFrameSignature?: string | null;
+  endFrameSignature?: string | null;
+  strictChallengeMode?: boolean;
   backgroundSeconds?: number;
   focusTransitions?: number;
   voiceCheck?: {
@@ -40,6 +46,7 @@ export interface SessionScoringInput {
     matchedRatio: number;
     wps: number;
     whisperMode: boolean;
+    rmsVoiceDetected?: boolean;
     explanation: string;
   } | null;
   comprehensionCheck?: {
@@ -52,9 +59,10 @@ export interface SessionScoringInput {
 }
 
 export interface SessionScoringOutput {
-  trustScore: number; // 0 - 100
+  trustScore: number;
   verified: boolean;
-  creditMultiplier: 1 | 0.5 | 0; // full, partial, or held pending cure
+  challengeEligible: boolean;
+  creditMultiplier: 1 | 0.5 | 0;
   verificationTier: VerificationTier;
   predictedMinutes: number;
   actualMinutes: number;
@@ -66,9 +74,6 @@ export interface SessionScoringOutput {
   summaryMessage: string;
 }
 
-/**
- * Normalizes passage tokens for resilient comparison across punctuation & casing.
- */
 export function normalizeTokens(text: string): string[] {
   return text
     .toLowerCase()
@@ -79,10 +84,6 @@ export function normalizeTokens(text: string): string[] {
     .filter((t) => t.length > 0);
 }
 
-/**
- * Evaluates a short (5-10s) spoken passage transcription against expected text
- * using normalized token-level matching + words-per-second & pause fluency heuristics.
- */
 export function evaluateSpeechPassage(params: {
   expectedText: string;
   transcribedText: string;
@@ -97,18 +98,15 @@ export function evaluateSpeechPassage(params: {
   const expectedTokens = normalizeTokens(params.expectedText);
 
   const wps = Math.round((spokenTokens.length / duration) * 100) / 100;
-  // Human plausible speech rate: ~1.1 to 4.4 words/sec (whisper can be slightly slower ~0.95 wps)
   const minWps = whisperMode ? 0.9 : 1.15;
   const maxWps = 4.4;
   const ratePlausible = wps >= minWps && wps <= maxWps;
 
-  // Pause distribution fluency score (0..1)
   const expectedPauses = Math.max(1, Math.round(duration / 3.2));
   const observedPauses = params.pauseCount ?? expectedPauses;
   const pauseDelta = Math.abs(observedPauses - expectedPauses);
   const pauseFluencyScore = Math.max(0.35, Math.min(1, 1 - pauseDelta * 0.14));
 
-  // E-reader fallback when chapter text is unavailable: check minimum word count + speech-likeness
   if (params.anySentenceFallback || expectedTokens.length === 0) {
     const uniqueRatio =
       spokenTokens.length > 0 ? new Set(spokenTokens).size / spokenTokens.length : 0;
@@ -122,7 +120,7 @@ export function evaluateSpeechPassage(params: {
         wordsPerSecond: wps,
         pauseFluencyScore,
         whisperMode,
-        explanation: `Verified natural reading cadence (${wps} words/sec across ${spokenTokens.length} words).`,
+        explanation: `Verified natural speech cadence (${wps} wps).`,
       };
     }
 
@@ -135,13 +133,11 @@ export function evaluateSpeechPassage(params: {
       whisperMode,
       explanation:
         spokenTokens.length < 4
-          ? 'Clip was too brief to detect a complete spoken sentence. Try reading one full sentence for 5–8 seconds.'
-          : `Cadence (${wps} words/sec) was outside the typical reading band (${minWps}–${maxWps} wps).`,
+          ? 'Clip was too short. Read one full sentence aloud for 5–8 seconds.'
+          : `Speech cadence (${wps} wps) fell outside natural reading bounds.`,
     };
   }
 
-  // Bag-of-bigrams + ordered window token match against expected passage prefix/excerpt
-  // Remember: a 5-10s clip typically covers 12-30 words of a longer passage!
   const candidateWindowLen = Math.max(spokenTokens.length + 8, 18);
   let bestMatchedRatio = 0;
 
@@ -168,7 +164,6 @@ export function evaluateSpeechPassage(params: {
   }
 
   const matchedRatio = Math.round(bestMatchedRatio * 100) / 100;
-  // Standard threshold >= 60%, Whisper mode >= 46% + pause fluency >= 0.65
   const requiredRatio = whisperMode ? 0.46 : 0.6;
   const fluencyOk = whisperMode ? pauseFluencyScore >= 0.6 && ratePlausible : ratePlausible;
 
@@ -181,9 +176,7 @@ export function evaluateSpeechPassage(params: {
       wordsPerSecond: wps,
       pauseFluencyScore,
       whisperMode,
-      explanation: `Matched ${Math.round(matchedRatio * 100)}% of passage tokens at ${wps} words/sec${
-        whisperMode ? ' (Whisper mode fluency verified)' : ''
-      }.`,
+      explanation: `Matched ${Math.round(matchedRatio * 100)}% of passage words at ${wps} wps.`,
     };
   }
 
@@ -195,11 +188,7 @@ export function evaluateSpeechPassage(params: {
       wordsPerSecond: wps,
       pauseFluencyScore,
       whisperMode,
-      explanation: !fluencyOk
-        ? `Tokens matched (${Math.round(matchedRatio * 100)}%), but cadence (${wps} wps) was unusual. Marked inconclusive—no strike issued.`
-        : `Partial token match (${Math.round(matchedRatio * 100)}%, target ≥${Math.round(
-            requiredRatio * 100
-          )}%). Background noise or page offset may have affected capture; marked inconclusive.`,
+      explanation: `Partial match (${Math.round(matchedRatio * 100)}%). Marked inconclusive—no strike issued.`,
     };
   }
 
@@ -210,35 +199,26 @@ export function evaluateSpeechPassage(params: {
     wordsPerSecond: wps,
     pauseFluencyScore,
     whisperMode,
-    explanation: `Only ${Math.round(matchedRatio * 100)}% of spoken words matched the passage from pages ${
-      expectedTokens.slice(0, 4).join(' ')
-    }… (target ≥${Math.round(requiredRatio * 100)}%).`,
+    explanation: `Only ${Math.round(matchedRatio * 100)}% of spoken words matched the passage.`,
   };
 }
 
-/**
- * Computes random Tier 2 voice check probability based on current user trust envelope.
- * Never 100% predictable; gentle on high-trust readers, attentive when variance appears.
- */
 export function computeRandomVoiceCheckProbability(params: {
   rollingTrustScore: number;
   hasRecentPaceVariance: boolean;
   activeStrikeCount: number;
 }): number {
-  let prob = 0.18;
-  if (params.rollingTrustScore >= 88) prob = 0.14;
-  else if (params.rollingTrustScore >= 72) prob = 0.28;
-  else if (params.rollingTrustScore >= 55) prob = 0.48;
-  else prob = 0.72;
+  let prob = 0.2;
+  if (params.rollingTrustScore >= 88) prob = 0.16;
+  else if (params.rollingTrustScore >= 72) prob = 0.3;
+  else if (params.rollingTrustScore >= 55) prob = 0.5;
+  else prob = 0.75;
 
   if (params.hasRecentPaceVariance) prob = Math.min(0.85, prob + 0.22);
   if (params.activeStrikeCount > 0) prob = Math.min(0.88, prob + 0.15);
   return Math.round(prob * 100) / 100;
 }
 
-/**
- * Core Tier 0 -> Tier 3 probabilistic trust scoring engine.
- */
 export function scoreReadingSession(input: SessionScoringInput): SessionScoringOutput {
   const flags: SessionFlag[] = [];
   const independentAdverseSignals: string[] = [];
@@ -250,12 +230,11 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
 
   const pagesRead = Math.max(0, input.endPage - input.startPage);
   const defaultWordsPerPage =
-    input.book.page_count > 0
-      ? input.book.word_count_estimate / input.book.page_count
-      : 280;
-  const wordsPerPage = input.wordsPerPageObserved && input.wordsPerPageObserved > 30
-    ? input.wordsPerPageObserved
-    : defaultWordsPerPage;
+    input.book.page_count > 0 ? input.book.word_count_estimate / input.book.page_count : 280;
+  const wordsPerPage =
+    input.wordsPerPageObserved && input.wordsPerPageObserved > 30
+      ? input.wordsPerPageObserved
+      : defaultWordsPerPage;
 
   const spanPrediction = predictPageSpanMinutes({
     pagesRead: Math.max(1, pagesRead),
@@ -264,18 +243,15 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
   });
 
   const wpmObserved =
-    pagesRead > 0
-      ? Math.round((pagesRead * wordsPerPage) / Math.max(0.25, actualMinutes))
-      : 0;
+    pagesRead > 0 ? Math.round((pagesRead * wordsPerPage) / Math.max(0.25, actualMinutes)) : 0;
 
-  // Baseline trust starts at 78 for passive-only, 86 when Tier 1 scan/progress is supplied
-  let trustScore = input.hasTier1ScanOrImport ? 86 : 76;
+  let trustScore = input.hasTier1ScanOrImport ? 86 : 74;
   let verificationTier: VerificationTier = input.hasTier1ScanOrImport ? 'passive' : 'none';
   let shouldEscalateNextSession = false;
+  let clockAnomaly = false;
+  let duplicateFrameDetected = false;
 
-  // --- TIER 0: Passive signals (always on) ---
-
-  // 1. Implausible speed (> 2x personal 95th percentile OR > 2x genre ceiling)
+  // --- TIER 0: Passive Anti-Cheat Signals ---
   const speedCeilingTrigger = Math.min(
     input.wpmBand.personal95thWpm * 2,
     input.wpmBand.genreCeilingWpm * 2
@@ -286,33 +262,47 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
     flags.push({
       code: 'implausible_speed',
       severity: 'escalated',
-      label: 'Implausible Reading Speed',
-      explanation: `Observed ${wpmObserved} WPM across ${pagesRead} pages exceeds more than 2× your ${input.wpmBand.personal95thWpm} WPM 95th-percentile envelope for this genre.`,
-      cureHint:
-        'Verify the start and end page numbers or complete a 10-minute scanned session at your natural reading pace.',
+      label: 'Implausible Pace',
+      explanation: `${wpmObserved} WPM exceeds >2× your ${input.wpmBand.personal95thWpm} WPM ceiling.`,
+      cureHint: 'Scan accurate start/end pages or complete a ≥10m verified Cure Session.',
     });
   }
 
-  // 2. Device clock anomaly check (wall clock vs monotonic clock)
   if (typeof input.monotonicElapsedSeconds === 'number' && input.monotonicElapsedSeconds > 0) {
     const monoMinutes = input.monotonicElapsedSeconds / 60;
     if (Math.abs(actualMinutes - monoMinutes) > 2.5) {
+      clockAnomaly = true;
       trustScore -= 34;
       independentAdverseSignals.push('clock_anomaly');
       flags.push({
         code: 'clock_anomaly',
         severity: 'escalated',
-        label: 'Clock Progression Drift',
-        explanation: `Device wall-clock elapsed time (${actualMinutes.toFixed(
-          1
-        )}m) diverged from monotonic timer (${monoMinutes.toFixed(1)}m).`,
-        cureHint:
-          'Keep automatic network time enabled on your device; complete a 10-minute live-timed session to restore full trust.',
+        label: 'Clock Tampering Detected',
+        explanation: `Device clock (${actualMinutes.toFixed(1)}m) diverged from live monotonic timer (${monoMinutes.toFixed(1)}m).`,
+        cureHint: 'Keep automatic system time enabled during live sessions.',
       });
     }
   }
 
-  // 3. Focus / background ratio (soft informational signal—never disqualifies physical/e-reader reading!)
+  // Anti-cheat duplicate scan frame check (prevent scanning identical page for both start & end)
+  if (
+    pagesRead >= 1 &&
+    input.startFrameSignature &&
+    input.endFrameSignature &&
+    computeSignatureDistance(input.startFrameSignature, input.endFrameSignature) <= 3
+  ) {
+    duplicateFrameDetected = true;
+    trustScore -= 36;
+    independentAdverseSignals.push('duplicate_scan_frame');
+    flags.push({
+      code: 'duplicate_scan_frame',
+      severity: 'escalated',
+      label: 'Identical Start & End Page Frame',
+      explanation: 'Start and end camera scans appear to capture the exact same page.',
+      cureHint: 'Scan the opening page at start and the new page reached at session end.',
+    });
+  }
+
   const bgSeconds = input.backgroundSeconds ?? 0;
   const focusSwitches = input.focusTransitions ?? 0;
   if (focusSwitches >= 14 && bgSeconds > actualMinutes * 60 * 0.75) {
@@ -320,64 +310,50 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
     flags.push({
       code: 'excessive_background_soft',
       severity: 'info',
-      label: 'Frequent App Switching (Soft Signal)',
-      explanation: `Detected ${focusSwitches} rapid tab/app switches while the timer ran. Screen-off reading is completely fine; frequent app-hopping slightly lowers passive confidence.`,
-      cureHint: 'No penalty applied. Lock your phone screen while reading physical books for distraction-free focus.',
+      label: 'Frequent App Switching',
+      explanation: `${focusSwitches} rapid app switches logged (soft note only).`,
+      cureHint: 'Lock your screen while reading physical books to stay focused.',
     });
   }
 
-  // --- TIER 1: Active low-friction scan / e-reader progress ---
+  // --- TIER 1: Live Scan Boundary Tolerance (±35%) ---
   if (input.hasTier1ScanOrImport && pagesRead > 0) {
     verificationTier = 'active';
-    const withinGenerousTolerance =
+    const withinTolerance =
       actualMinutes >= spanPrediction.toleranceLowMinutes &&
       actualMinutes <= spanPrediction.toleranceHighMinutes;
 
-    if (withinGenerousTolerance) {
+    if (withinTolerance && !duplicateFrameDetected) {
       trustScore += 8;
     } else if (!independentAdverseSignals.includes('implausible_speed')) {
-      // Outside ±35% tolerance: do NOT disqualify—soft variance + escalate probability next time
       trustScore -= 10;
       shouldEscalateNextSession = true;
       flags.push({
         code: 'pace_variance',
         severity: 'soft',
-        label: 'Outside ±35% Predicted Window',
-        explanation: `Read ${pagesRead} pages in ${actualMinutes.toFixed(
-          1
-        )}m vs. predicted ${spanPrediction.toleranceLowMinutes.toFixed(
-          1
-        )}–${spanPrediction.toleranceHighMinutes.toFixed(1)}m for this book's density.`,
-        cureHint:
-          'Session still counts! Skimming notes or dense passages happens—Booklit may ask for a quick 6-second passage read next time.',
-      });
-    }
-
-    const minScanConf = Math.min(
-      input.startScanConfidence ?? 0.9,
-      input.endScanConfidence ?? 0.9
-    );
-    if (minScanConf < 0.55) {
-      trustScore -= 4;
-      flags.push({
-        code: 'ocr_low_confidence',
-        severity: 'info',
-        label: 'Low-Light Page Scan',
-        explanation: `Page capture OCR confidence was ${Math.round(
-          minScanConf * 100
-        )}%; manual page boundary was used.`,
-        cureHint: 'Angle the page slightly under warm light to avoid glare on glossy paper.',
+        label: 'Outside ±35% Expected Window',
+        explanation: `${pagesRead}p in ${actualMinutes.toFixed(1)}m vs expected ${spanPrediction.toleranceLowMinutes.toFixed(1)}–${spanPrediction.toleranceHighMinutes.toFixed(1)}m.`,
+        cureHint: 'Counts normally; a short voice check may trigger on your next session.',
       });
     }
   }
 
-  // --- TIER 2: Random Voice Verification & Optional Comprehension ---
+  // --- TIER 2: Live Voice Verification & Comprehension ---
   if (input.voiceCheck) {
     verificationTier = 'active';
-    if (input.voiceCheck.result === 'pass') {
+    if (input.voiceCheck.rmsVoiceDetected === false) {
+      trustScore -= 28;
+      independentAdverseSignals.push('silent_audio_rejected');
+      flags.push({
+        code: 'silent_audio_rejected',
+        severity: 'escalated',
+        label: 'Silent Microphone Rejected',
+        explanation: 'No human voice energy was detected on the microphone stream.',
+        cureHint: 'Unmute your microphone and read the short passage aloud for 5–8s.',
+      });
+    } else if (input.voiceCheck.result === 'pass') {
       trustScore += 12;
     } else if (input.voiceCheck.result === 'inconclusive') {
-      // Check rolling 7-day window for prior inconclusive/failed voice checks
       const priorVoiceIssues = input.recentVerificationEvents7d.filter(
         (ev) => ev.type === 'voice_check' && (ev.result === 'inconclusive' || ev.result === 'fail')
       ).length;
@@ -397,19 +373,14 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
             ? 'Repeated Inconclusive Voice Check'
             : 'Inconclusive Voice Check (No Strike)',
         explanation: input.voiceCheck.explanation,
-        cureHint:
-          priorVoiceIssues >= 1
-            ? 'Two inconclusive voice checks occurred within 7 days. Complete a 10-minute Cure Session in a quiet room (or toggle Whisper Mode).'
-            : 'First inconclusive check never triggers a strike. Enable Whisper Mode if reading in a quiet library or bedroom.',
+        cureHint: 'Toggle Whisper Mode in quiet rooms or complete a 10m Cure Session.',
       });
     } else {
-      // Failed voice check: first isolated failure is treated as inconclusive unless paired with another signal or prior 7d voice issue!
       const priorVoiceIssues = input.recentVerificationEvents7d.filter(
         (ev) => ev.type === 'voice_check' && (ev.result === 'fail' || ev.result === 'inconclusive')
       ).length;
 
       if (priorVoiceIssues >= 1) {
-        // Repeated active check issue in rolling 7-day window counts as two aligned voice signals
         trustScore -= 32;
         independentAdverseSignals.push('voice_failed');
         independentAdverseSignals.push('repeated_voice_window');
@@ -424,11 +395,10 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
           priorVoiceIssues >= 1 || independentAdverseSignals.length >= 2 ? 'escalated' : 'soft',
         label:
           priorVoiceIssues === 0 && independentAdverseSignals.length < 2
-            ? 'Voice Check Mismatch (1st Warning — No Strike)'
-            : 'Voice Verification Failed',
+            ? 'Voice Check Mismatch (1st Warning)'
+            : 'Voice Check Failed',
         explanation: input.voiceCheck.explanation,
-        cureHint:
-          'Never penalized on a single isolated voice mismatch. Read from the scanned page range for 6–8 seconds, or complete a 10-minute Cure Session if a strike was issued.',
+        cureHint: 'Isolated failures never strike. Read from your active page range for 6–8s.',
       });
     }
   }
@@ -444,14 +414,14 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
       flags.push({
         code: 'comprehension_missed',
         severity: 'soft',
-        label: 'Passage Micro-Check Missed',
+        label: 'Passage Check Missed',
         explanation: input.comprehensionCheck.explanation,
-        cureHint: 'Review the passage summary or retry a comprehension check on your next chapter.',
+        cureHint: 'Review the passage before finishing your next session.',
       });
     }
   }
 
-  // --- TIER 3: Strike Gate (requires >= 2 independent signals!) ---
+  // --- TIER 3: Two-Independent-Signal Strike Gate ---
   const uniqueSignals = Array.from(new Set(independentAdverseSignals));
   const strikeIssued = uniqueSignals.length >= 2;
 
@@ -462,26 +432,50 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
 
   trustScore = Math.max(5, Math.min(100, Math.round(trustScore)));
 
-  // Thresholds:
-  // trustScore >= 60 && !strikeIssued -> verified = true (full credit)
-  // 42..59 && !strikeIssued -> verified = true (partial soft flag note, counts honestly)
-  // strikeIssued or trustScore < 42 -> verified = false (can be cured within 7 days)
-  const verified = !strikeIssued && trustScore >= 52 && pagesRead > 0;
+  // Verified requires live scan or active check without strike
+  const verified =
+    !strikeIssued &&
+    !duplicateFrameDetected &&
+    !clockAnomaly &&
+    trustScore >= 58 &&
+    pagesRead > 0 &&
+    input.hasTier1ScanOrImport;
+
+  // Competitive Challenge Eligibility: strictly requires BOTH live camera scans, distinct frames, real timer, and voice check when strict mode is active
+  const bothLiveScans = Boolean(input.liveCameraStart && input.liveCameraEnd);
+  const voicePassedForStrict = input.strictChallengeMode
+    ? Boolean(
+        input.voiceCheck &&
+          input.voiceCheck.result === 'pass' &&
+          input.voiceCheck.rmsVoiceDetected !== false
+      )
+    : true;
+
+  const challengeEligible =
+    verified &&
+    bothLiveScans &&
+    !duplicateFrameDetected &&
+    !clockAnomaly &&
+    actualMinutes >= 3 &&
+    voicePassedForStrict;
+
   const creditMultiplier: 1 | 0.5 | 0 = strikeIssued ? 0 : trustScore >= 65 ? 1 : 0.5;
 
-  let summaryMessage = 'Verified calmly within your personal reading envelope.';
+  let summaryMessage = verified
+    ? 'Verified session recorded.'
+    : !input.hasTier1ScanOrImport
+    ? 'Logged as unverified progress (live camera scan required for verification & challenges).'
+    : 'Session flagged—review signal details below.';
+
   if (strikeIssued) {
-    summaryMessage = `Escalated (${uniqueSignals.length} independent signals aligned). A curable strike was recorded—historical verified minutes remain intact, and a 10-minute verified Cure Session within 7 days removes it completely.`;
-  } else if (flags.some((f) => f.severity === 'soft')) {
     summaryMessage =
-      'Session logged with a gentle note—counts toward your reading habit without a strike.';
-  } else if (trustScore >= 90) {
-    summaryMessage = 'High-confidence verified session. Your genre speed forecast was updated.';
+      'Curable strike recorded (2 signals aligned). Complete a ≥10m verified Cure Session within 7 days to clear it.';
   }
 
   return {
     trustScore,
     verified,
+    challengeEligible,
     creditMultiplier,
     verificationTier,
     predictedMinutes: spanPrediction.predictedMinutes,
@@ -495,9 +489,6 @@ export function scoreReadingSession(input: SessionScoringInput): SessionScoringO
   };
 }
 
-/**
- * Checks whether a newly completed verified session qualifies to cure an active strike within the past 7 days.
- */
 export function findCurableStrikeSession(
   newSession: Pick<ReadingSession, 'verified' | 'strike_issued' | 'actual_minutes' | 'ended_at'>,
   existingSessions: ReadingSession[]
