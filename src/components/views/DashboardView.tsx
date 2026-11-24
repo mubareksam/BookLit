@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   Swords,
   Trophy,
+  Users,
 } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 import { GENRE_META } from '@/lib/types';
@@ -34,6 +35,8 @@ export function DashboardView() {
     setSelectedBookId,
     setSelectedReaderUsername,
     setActiveView,
+    activityFeed,
+    readers,
   } = useBooklit();
 
   const booksById = useMemo(() => new Map(books.map((b) => [b.id, b])), [books]);
@@ -276,6 +279,31 @@ export function DashboardView() {
           </div>
         </div>
       </div>
+
+      {/* Social strip: newest verified activity from the readers you tether */}
+      <button
+        type="button"
+        onClick={() => setActiveView('social')}
+        className="w-full text-left rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3.5 flex items-center gap-3 min-w-0 hover:border-emerald-500/40 transition"
+      >
+        <div className="w-9 h-9 rounded-full bg-emerald-600/10 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
+          <Users className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-semibold">Feed & readers</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-medium">
+              {readers.length} reader{readers.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-500 truncate">
+            {activityFeed[0]
+              ? `@${activityFeed[0].actorUsername} ${activityFeed[0].summary}`
+              : 'Verified sessions and duels from your tethers appear here.'}
+          </p>
+        </div>
+        <ChevronRight className="w-4 h-4 text-zinc-300 dark:text-zinc-600 shrink-0" />
+      </button>
 
       {/* Active Challenges, 1v1 Duels & Rank Strip */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">

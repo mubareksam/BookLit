@@ -1,48 +1,40 @@
 'use client';
 
 import React, { useState } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
+import { format } from 'date-fns';
 import {
-  Activity,
   Award,
   Camera,
   Check,
+  ChevronRight,
   Copy,
   Crown,
   KeyRound,
   Plus,
-  Search,
   ShieldCheck,
-  Sparkles,
   Swords,
   Trophy,
-  UserCheck,
-  UserPlus,
-  Users,
   X,
 } from 'lucide-react';
 import { useBooklit } from '@/context/BooklitContext';
 
-type ArenaSubTab = 'leaderboards' | 'duels' | 'community';
+type ArenaSubTab = 'leaderboards' | 'duels';
 
 export function ChallengesView() {
   const {
     user,
     challenges,
     duels,
-    readers,
-    activityFeed,
     mySocialProfile,
     createChallenge,
     joinChallenge,
     createDuel,
     acceptDuel,
     declineDuel,
-    toggleFollowReader,
-    toggleSparkEvent,
     refreshSocialAndDuels,
-    setSelectedReaderUsername,
     openSessionFlow,
+    setActiveView,
+    setSelectedReaderUsername,
   } = useBooklit();
 
   const [subTab, setSubTab] = useState<ArenaSubTab>('leaderboards');
@@ -71,7 +63,6 @@ export function ChallengesView() {
   // Invite codes & search
   const [inviteInput, setInviteInput] = useState('');
   const [duelCodeInput, setDuelCodeInput] = useState('');
-  const [readerSearch, setReaderSearch] = useState('');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
@@ -213,24 +204,21 @@ export function ChallengesView() {
               </span>
             )}
           </button>
-
-          <button
-            type="button"
-            onClick={() => setSubTab('community')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
-              subTab === 'community'
-                ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm'
-                : 'text-zinc-500'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            Readers & Feed
-          </button>
         </div>
 
-        <div className="inline-flex items-center gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-400 font-medium">
-          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-          <span>Strict Live-Camera Anti-Cheat</span>
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            type="button"
+            onClick={() => setActiveView('social')}
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline shrink-0"
+          >
+            Feed & readers
+            <ChevronRight className="w-3 h-3" />
+          </button>
+          <div className="inline-flex items-center gap-1.5 text-[11px] text-zinc-500 font-medium min-w-0">
+            <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Live-camera anti-cheat</span>
+          </div>
         </div>
       </div>
 
@@ -636,168 +624,6 @@ export function ChallengesView() {
               })}
             </div>
           )}
-        </div>
-      )}
-
-      {/* ==================== TAB 3: READERS & LIVE FEED ==================== */}
-      {subTab === 'community' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-w-0">
-          {/* Readers Directory */}
-          <div className="lg:col-span-7 space-y-3 min-w-0">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                refreshSocialAndDuels(readerSearch);
-              }}
-              className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3.5 py-2 flex items-center gap-2"
-            >
-              <Search className="w-4 h-4 text-zinc-400 shrink-0" />
-              <input
-                type="text"
-                value={readerSearch}
-                onChange={(e) => {
-                  setReaderSearch(e.target.value);
-                  refreshSocialAndDuels(e.target.value);
-                }}
-                placeholder="Find readers by @username, name, or rank…"
-                className="flex-1 min-w-0 bg-transparent text-xs focus:outline-none"
-              />
-            </form>
-
-            {readers.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-zinc-200 dark:border-zinc-800 p-8 text-center text-xs text-zinc-500">
-                {readerSearch.trim()
-                  ? `No reader matches “${readerSearch.trim()}”. Try fewer letters or their exact @username.`
-                  : 'No other public readers yet—tether a friend once they join Booklit.'}
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {readers.map((r) => (
-                  <div
-                    key={r.userId}
-                    className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 flex flex-wrap items-center justify-between gap-3 min-w-0"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedReaderUsername(r.username)}
-                      className="flex items-center gap-3 min-w-0 text-left flex-1"
-                    >
-                      <div className="w-10 h-10 rounded-xl bg-emerald-600/15 text-emerald-700 dark:text-emerald-300 font-bold text-sm flex items-center justify-center shrink-0">
-                        {r.displayName.slice(0, 1).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs font-bold truncate">{r.displayName}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-medium shrink-0">
-                            {r.rankTitle}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-zinc-500 truncate">
-                          @{r.username} · {r.verifiedMinutesTotal}m verified · {r.duelWins}W–
-                          {r.duelLosses}L
-                          {typeof r.sparkCount === 'number' && r.sparkCount > 0
-                            ? ` · ${r.sparkCount} sparks`
-                            : ''}
-                        </div>
-                      </div>
-                    </button>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDuelInvitedUsername(r.username);
-                          setCreateDuelOpen(true);
-                        }}
-                        title="Challenge to 1v1 Duel"
-                        className="p-2 rounded-xl border border-zinc-200 dark:border-zinc-700 text-emerald-600 hover:bg-emerald-500/10"
-                      >
-                        <Swords className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => toggleFollowReader(r.userId)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1 ${
-                          r.isFollowing
-                            ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-                            : 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
-                        }`}
-                      >
-                        {r.isFollowing ? (
-                          <>
-                            <UserCheck className="w-3 h-3" />
-                            {r.isTethered ? 'Tethered' : 'Tethering'}
-                          </>
-                        ) : (
-                          <>
-                            <UserPlus className="w-3 h-3" /> Tether
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Live Verified Activity Feed */}
-          <div className="lg:col-span-5 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 space-y-3 min-w-0 h-fit">
-            <div className="flex items-center gap-1.5 text-xs font-semibold">
-              <Activity className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Live Arena Feed</span>
-              <span className="ml-auto text-[10px] font-normal text-zinc-400">
-                Sparks = verified likes
-              </span>
-            </div>
-
-            {activityFeed.length === 0 ? (
-              <p className="text-xs text-zinc-500 py-6 text-center">
-                Verified sessions, challenge launches, and 1v1 duel results appear here live.
-              </p>
-            ) : (
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {activityFeed.slice(0, 14).map((ev) => (
-                  <div key={ev.id} className="py-2.5 text-xs space-y-1.5 min-w-0">
-                    <div className="leading-snug break-words">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedReaderUsername(ev.actorUsername)}
-                        className="font-semibold text-emerald-700 dark:text-emerald-400 hover:underline"
-                      >
-                        @{ev.actorUsername}
-                      </button>{' '}
-                      <span className="text-zinc-700 dark:text-zinc-300">{ev.summary}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] text-zinc-400">
-                      <span>
-                        {formatDistanceToNow(new Date(ev.createdAt), { addSuffix: true })}
-                      </span>
-                      {typeof ev.trustScore === 'number' && (
-                        <span className="font-mono text-emerald-600">
-                          Honest {ev.trustScore}/1000
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => toggleSparkEvent(ev.id)}
-                        aria-pressed={Boolean(ev.sparkedByMe)}
-                        aria-label={ev.sparkedByMe ? 'Remove spark' : 'Spark this activity'}
-                        className={`ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-semibold transition ${
-                          ev.sparkedByMe
-                            ? 'border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                            : 'border-zinc-200 dark:border-zinc-700 text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800'
-                        }`}
-                      >
-                        <Sparkles className="w-3 h-3" />
-                        {ev.sparkCount ?? 0}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
       )}
 
